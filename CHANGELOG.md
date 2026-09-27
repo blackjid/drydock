@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/sholdee/drydock/compare/v0.3.1...v0.3.2) (2026-09-27)
+
+
+### Bug Fixes
+
+* **deps:** update module k8s.io/apimachinery to v0.37.1 ([#351](https://github.com/sholdee/drydock/issues/351)) ([3c78534](https://github.com/sholdee/drydock/commit/3c78534c2cad8a2ae5dd9843e12a0a7a0760182f))
+
 ## [0.3.1](https://github.com/sholdee/drydock/compare/v0.3.0...v0.3.1) (2026-09-24)
 
 
