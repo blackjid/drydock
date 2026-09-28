@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 
+	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/sholdee/drydock/internal/acquisition"
 	"github.com/sholdee/drydock/internal/cacheevent"
 	"github.com/sholdee/drydock/internal/change"
@@ -63,9 +64,11 @@ func (o Orchestrator) buildDiffSides(ctx context.Context, request DiffRequest) (
 		rightBuildRequest.renderSettingsSignature = rightList.result.renderSettingsSignature
 		rightBuildRequest.discovered = rightList.result.discovered
 
-		leftSelected, leftUnowned := SelectChangedApplicationInputs(leftList.result.ApplicationInputs, changedPaths)
-		rightSelected, rightUnowned := SelectChangedApplicationInputs(rightList.result.ApplicationInputs, changedPaths)
-		unowned := unownedByNeitherSide(leftUnowned, rightUnowned)
+		// Each side owns the Kustomize graph of its own tree, so a base file
+		// added or deleted by the change is owned by the side that has it.
+		leftInputs := withKustomizeSelectionPaths(ctx, leftBuildRequest.Path, leftBuildRequest.RepoMaps, leftList.result.ApplicationInputs)
+		rightInputs := withKustomizeSelectionPaths(ctx, rightBuildRequest.Path, rightBuildRequest.RepoMaps, rightList.result.ApplicationInputs)
+		leftSelected, rightSelected, unowned := selectChangedDiffSides(leftInputs, rightInputs, changedPaths)
 		if len(unowned) > 0 {
 			diag := diagnostic.Diagnostic{
 				Severity: diagnostic.SeverityWarning,
@@ -116,6 +119,32 @@ func changedOnlyPathFilter(request DiffRequest) (change.PathFilter, error) {
 		Includes: request.ChangedOnlyIncludeGlobs,
 		Ignores:  request.ChangedOnlyIgnoreGlobs,
 	})
+}
+
+// selectChangedDiffSides selects, on each side, every Application that either
+// side's inputs select, plus the changed paths neither side owns. Ownership
+// can differ per tree — a file the change deletes is only in the left tree's
+// Kustomize graph — and rendering an Application on one side only would
+// report a false all-added or all-deleted diff instead of the real change or
+// render failure.
+func selectChangedDiffSides(leftInputs, rightInputs []ApplicationSelectionInput, changedPaths []string) ([]argoappv1.Application, []argoappv1.Application, []string) {
+	leftSelected, leftUnowned := SelectChangedApplicationInputs(leftInputs, changedPaths)
+	rightSelected, rightUnowned := SelectChangedApplicationInputs(rightInputs, changedPaths)
+	selectedKeys := make(map[string]struct{}, len(leftSelected)+len(rightSelected))
+	for _, application := range append(append([]argoappv1.Application(nil), leftSelected...), rightSelected...) {
+		selectedKeys[applicationKey(application)] = struct{}{}
+	}
+	return selectedByKey(leftInputs, selectedKeys), selectedByKey(rightInputs, selectedKeys), unownedByNeitherSide(leftUnowned, rightUnowned)
+}
+
+func selectedByKey(inputs []ApplicationSelectionInput, keys map[string]struct{}) []argoappv1.Application {
+	selected := make([]argoappv1.Application, 0, len(keys))
+	for _, input := range inputs {
+		if _, ok := keys[applicationKey(input.Application)]; ok {
+			selected = append(selected, input.Application)
+		}
+	}
+	return selected
 }
 
 func unownedByNeitherSide(leftUnowned, rightUnowned []string) []string {
