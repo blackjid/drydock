@@ -243,8 +243,14 @@ Diff behavior:
 
 Changed-only mode is on by default for multi-Application PR diffs. It indexes
 Application manifest files, source paths, `$ref` value files, and supported
-`argocd.argoproj.io/manifest-generate-paths` inputs. If every changed path can
-be mapped, only affected Applications render. If any path is unowned,
+`argocd.argoproj.io/manifest-generate-paths` inputs, plus the local Kustomize
+input graph of every source that renders from the tree under diff (the same
+refs the persistent render cache digests). Individual refs the digest walk
+rejects drop out of ownership; a graph that cannot be read contributes
+nothing, so its changes stay unowned. Selection is unioned across both diff
+sides by Application identity, because a deleted file is only in the left
+tree's graph. If every changed path can be mapped, only affected Applications
+render. If any path is unowned,
 non-strict mode warns and renders all Applications; `--strict-changed-only`
 fails instead.
 

@@ -78,6 +78,20 @@ Changed-only behavior is Argo Application-aware. Shared resources from
 different Applications remain separate diff identities; drydock does not
 collapse overlapping Applications into one owner.
 
+Ownership follows the local Kustomize input graph, not only
+`spec.source.path`. An Application whose path is an overlay such as
+`apps/demo/overlays/staging` also owns the files that overlay reaches through
+`resources`, `bases`, `components`, `helmCharts.valuesFile`,
+`helmCharts.additionalValuesFiles`, and local patch, generator, and transformer
+paths. Editing `apps/demo/base/helm-release/values.yaml` therefore selects every
+overlay that includes that base. Only sources that render from the local
+checkout contribute: sources fetched from another repository, repo-mapped to
+another checkout, or stored in OCI do not. Remote refs do not add ownership.
+If the Kustomize graph cannot be read, for example because a kustomization
+escapes the repository or fails to parse, the Application keeps only its
+`spec.source.path` ownership. A change only that graph would have owned then
+stays unowned and falls back to rendering all Applications.
+
 Path filters are explicit command or workflow policy. Keep filters narrow in
 repositories that use plugins or unusual generation paths, because an ignored
 file is no longer eligible to trigger a render.

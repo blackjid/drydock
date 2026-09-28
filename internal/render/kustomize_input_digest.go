@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/sholdee/drydock/internal/gitref"
@@ -14,6 +15,9 @@ import (
 type kustomizeInputCollector struct {
 	repoRoot string
 	paths    map[string]gitref.PathDigestPath
+	// bestEffort skips a ref that cannot be collected instead of failing the
+	// walk. Only changed-only selection sets it; digest keys never do.
+	bestEffort bool
 }
 
 // KustomizeInputDigestPaths returns the committed repository-relative local
@@ -52,6 +56,48 @@ func KustomizeInputDigestPaths(ctx context.Context, source ResolvedSource, opts 
 		out = append(out, item)
 	}
 	return out, nil
+}
+
+// KustomizeSelectionPaths returns the repository-relative local inputs of the
+// Kustomize graph rooted at sourcePath, for changed-only ownership. It walks
+// the same graph and refs as KustomizeInputDigestPaths but is best-effort: a
+// ref that is remote, missing, outside repoRoot, or symlinked is skipped
+// rather than failing the walk. An error means the graph itself could not be
+// read; callers fall back to spec.source.path ownership.
+func KustomizeSelectionPaths(ctx context.Context, repoRoot, sourcePath string) ([]string, error) {
+	root, err := sourceRoot(ResolvedSource{RepoRoot: repoRoot, Path: sourcePath})
+	if err != nil {
+		return nil, err
+	}
+	_, graph, err := collectKustomizeGraphForPreparation(ctx, repoRoot, root)
+	if err != nil {
+		return nil, err
+	}
+	collector := &kustomizeInputCollector{
+		repoRoot:   filepath.Clean(repoRoot),
+		paths:      map[string]gitref.PathDigestPath{},
+		bestEffort: true,
+	}
+	for _, node := range graph {
+		if err := collector.collectNode(ctx, node); err != nil {
+			return nil, err
+		}
+	}
+	out := make([]string, 0, len(collector.paths))
+	for path := range collector.paths {
+		out = append(out, path)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// skip reports err unless the collector is best-effort, in which case the
+// failing ref is dropped. Context cancellation always propagates.
+func (c *kustomizeInputCollector) skip(ctx context.Context, err error) error {
+	if err == nil || !c.bestEffort {
+		return err
+	}
+	return ctx.Err()
 }
 
 func (c *kustomizeInputCollector) collectNode(ctx context.Context, node kustomizeGraphNode) error {
@@ -122,7 +168,7 @@ func (c *kustomizeInputCollector) collectHelmValueRef(ctx context.Context, dir, 
 		return nil
 	}
 	if isRemoteHelmValueFile(ref) {
-		return fmt.Errorf("kustomize %s %q is a remote Helm value file", field, redactKustomizeRef(ref))
+		return c.skip(ctx, fmt.Errorf("kustomize %s %q is a remote Helm value file", field, redactKustomizeRef(ref)))
 	}
 	return c.addLocalRef(ctx, dir, field, ref, false)
 }
@@ -231,7 +277,7 @@ func (c *kustomizeInputCollector) collectGeneratorManifestRef(ctx context.Contex
 		return err
 	}
 	if _, _, ok, err := remoteRequestForKustomizeRef(ref); err != nil || ok {
-		return err
+		return c.skip(ctx, err)
 	}
 	path := filepath.Clean(filepath.Join(dir, filepath.FromSlash(ref)))
 	for _, fileRef := range ksopsGeneratorFileRefs(path) {
@@ -263,11 +309,11 @@ func (c *kustomizeInputCollector) addKustomizeRef(ctx context.Context, dir, fiel
 	}
 	request, parsed, ok, err := remoteRequestForKustomizeRef(ref)
 	if err != nil {
-		return err
+		return c.skip(ctx, err)
 	}
 	if ok {
 		if request.Kind != "git-repo" || !isPinnedKustomizeRemoteRevision(parsed.Revision) {
-			return fmt.Errorf("kustomize %s %q is not a pinned remote Git ref", field, redactKustomizeRef(ref))
+			return c.skip(ctx, fmt.Errorf("kustomize %s %q is not a pinned remote Git ref", field, redactKustomizeRef(ref)))
 		}
 		return nil
 	}
@@ -276,14 +322,14 @@ func (c *kustomizeInputCollector) addKustomizeRef(ctx context.Context, dir, fiel
 
 func (c *kustomizeInputCollector) addLocalRef(ctx context.Context, dir, field, ref string, optional bool) error {
 	if filepath.IsAbs(ref) {
-		return fmt.Errorf("kustomize %s %q must be relative", field, ref)
+		return c.skip(ctx, fmt.Errorf("kustomize %s %q must be relative", field, ref))
 	}
 	if isRemoteKustomizeRef(ref) {
-		return unsupportedRemoteKustomizeRefError(field, ref)
+		return c.skip(ctx, unsupportedRemoteKustomizeRefError(field, ref))
 	}
 	path := filepath.Clean(filepath.Join(dir, filepath.FromSlash(ref)))
 	if err := rejectPathOutsideBoundary("kustomize "+field, path, c.repoRoot); err != nil {
-		return err
+		return c.skip(ctx, err)
 	}
 	return c.addAbsPath(ctx, path, optional)
 }
@@ -292,6 +338,10 @@ func (c *kustomizeInputCollector) addAbsPath(ctx context.Context, path string, o
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	return c.skip(ctx, c.addAbsPathStrict(ctx, path, optional))
+}
+
+func (c *kustomizeInputCollector) addAbsPathStrict(ctx context.Context, path string, optional bool) error {
 	path = filepath.Clean(path)
 	if err := rejectPathOutsideBoundary("kustomize input", path, c.repoRoot); err != nil {
 		return err
