@@ -91,10 +91,57 @@ data:
 	writeTestFile(t, filepath.Join(root, "workloads", "demo", "base", "helm-release", "values.yaml"), "value: "+value+"\n")
 }
 
+// writeSourceKustomizeComponentApps writes a component both overlays render:
+// staging includes it from its kustomization, production only through
+// spec.source.kustomize.components. The staging include owning the component
+// must not leave production unselected.
+func writeSourceKustomizeComponentApps(t *testing.T, root, value string) {
+	t.Helper()
+	writeKustomizePlainBaseApps(t, root, "same")
+	writeTestFile(t, filepath.Join(root, "apps", "demo-production.yaml"), `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: demo-production
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://github.com/example/repo
+    targetRevision: main
+    path: workloads/demo/overlays/production
+    kustomize:
+      components:
+        - ../../components/extra
+  destination:
+    name: in-cluster
+    namespace: demo-production
+`)
+	writeTestFile(t, filepath.Join(root, "workloads", "demo", "overlays", "staging", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: demo-staging
+resources:
+  - ../../base
+components:
+  - ../../components/extra
+`)
+	writeTestFile(t, filepath.Join(root, "workloads", "demo", "components", "extra", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - configmap.yaml
+`)
+	writeTestFile(t, filepath.Join(root, "workloads", "demo", "components", "extra", "configmap.yaml"), `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: extra
+data:
+  value: `+value+`
+`)
+}
+
 func TestOrchestratorDiffAppsStrictChangedOnlyOwnsKustomizeBase(t *testing.T) {
 	for name, write := range map[string]func(*testing.T, string, string){
-		"plain base resource":    writeKustomizePlainBaseApps,
-		"base helmCharts values": writeKustomizeOverlayApps,
+		"plain base resource":         writeKustomizePlainBaseApps,
+		"base helmCharts values":      writeKustomizeOverlayApps,
+		"source kustomize components": writeSourceKustomizeComponentApps,
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertStrictChangedOnlySelectsBothOverlays(t, write)
@@ -215,6 +262,34 @@ func TestWithKustomizeSelectionPathsOnlyWalksLocallyRenderedSources(t *testing.T
 	selected, unowned := SelectChangedApplicationInputs(got, []string{values, "README.md"})
 	if len(selected) != 2 || !slices.Equal(unowned, []string{"README.md"}) {
 		t.Fatalf("selected = %d apps, unowned = %v; want local+multi selected and only README.md unowned", len(selected), unowned)
+	}
+}
+
+// TestWithKustomizeSelectionPathsKeysWalksBySourceKustomizeOptions pins the
+// walk memo key: two sources on one path own different inputs when only one
+// adds spec.source.kustomize components, in either walk order.
+func TestWithKustomizeSelectionPathsKeysWalksBySourceKustomizeOptions(t *testing.T) {
+	root := t.TempDir()
+	writeSourceKustomizeComponentApps(t, root, "v")
+	const component = "workloads/demo/components/extra"
+
+	plain := argoappv1.ApplicationSource{RepoURL: "https://github.com/example/repo", Path: "workloads/demo/overlays/production"}
+	withComponent := plain
+	withComponent.Kustomize = &argoappv1.ApplicationSourceKustomize{Components: []string{"../../components/extra"}}
+	input := func(name string, source argoappv1.ApplicationSource) ApplicationSelectionInput {
+		return ApplicationSelectionInput{Application: argoappv1.Application{Name: name, Spec: argoappv1.ApplicationSpec{Source: &source}}}
+	}
+
+	for _, inputs := range [][]ApplicationSelectionInput{
+		{input("plain", plain), input("component", withComponent)},
+		{input("component", withComponent), input("plain", plain)},
+	} {
+		for _, got := range withKustomizeSelectionPaths(context.Background(), root, nil, inputs) {
+			wantOwns := got.Application.Name == "component"
+			if owns := slices.Contains(got.Paths, component); owns != wantOwns {
+				t.Errorf("%s owns %s = %v, want %v (walk order %s first)", got.Application.Name, component, owns, wantOwns, inputs[0].Application.Name)
+			}
+		}
 	}
 }
 

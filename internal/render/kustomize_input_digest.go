@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/sholdee/drydock/internal/gitref"
 	"sigs.k8s.io/kustomize/api/types"
 )
@@ -60,11 +61,12 @@ func KustomizeInputDigestPaths(ctx context.Context, source ResolvedSource, opts 
 
 // KustomizeSelectionPaths returns the repository-relative local inputs of the
 // Kustomize graph rooted at sourcePath, for changed-only ownership. It walks
-// the same graph and refs as KustomizeInputDigestPaths but is best-effort: a
-// ref that is remote, missing, outside repoRoot, or symlinked is skipped
-// rather than failing the walk. An error means the graph itself could not be
-// read; callers fall back to spec.source.path ownership.
-func KustomizeSelectionPaths(ctx context.Context, repoRoot, sourcePath string) ([]string, error) {
+// the same graph and refs as KustomizeInputDigestPaths, including the
+// source-level components and patches in kustomize, but is best-effort: a ref
+// that is remote, missing, outside repoRoot, or symlinked is skipped rather
+// than failing the walk. An error means the graph itself could not be read;
+// callers fall back to spec.source.path ownership.
+func KustomizeSelectionPaths(ctx context.Context, repoRoot, sourcePath string, kustomize *argoappv1.ApplicationSourceKustomize) ([]string, error) {
 	root, err := sourceRoot(ResolvedSource{RepoRoot: repoRoot, Path: sourcePath})
 	if err != nil {
 		return nil, err
@@ -83,12 +85,54 @@ func KustomizeSelectionPaths(ctx context.Context, repoRoot, sourcePath string) (
 			return nil, err
 		}
 	}
+	if err := collector.collectSourceKustomizeRefs(ctx, root, kustomize); err != nil {
+		return nil, err
+	}
 	out := make([]string, 0, len(collector.paths))
 	for path := range collector.paths {
 		out = append(out, path)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// collectSourceKustomizeRefs adds the spec.source.kustomize components and
+// patch files that rendering merges into the source kustomization
+// (applySourceKustomizeOptions). The digest collects the same refs through
+// sourceKustomizeWorkspaceAdditions; this best-effort form keeps a
+// component's own directory when its graph cannot be read.
+func (c *kustomizeInputCollector) collectSourceKustomizeRefs(ctx context.Context, sourceRoot string, kustomize *argoappv1.ApplicationSourceKustomize) error {
+	if kustomize == nil {
+		return nil
+	}
+	for _, component := range kustomize.Components {
+		if err := c.addKustomizeRef(ctx, sourceRoot, "kustomize.components", component, false); err != nil {
+			return err
+		}
+		component = strings.TrimSpace(component)
+		if component == "" || isRemoteKustomizeRef(component) || filepath.IsAbs(component) {
+			continue
+		}
+		componentRoot := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(component)))
+		_, graph, err := collectKustomizeGraphForPreparation(ctx, c.repoRoot, componentRoot)
+		if err != nil {
+			if err := c.skip(ctx, err); err != nil {
+				return err
+			}
+			continue
+		}
+		for _, node := range graph {
+			if err := c.collectNode(ctx, node); err != nil {
+				return err
+			}
+		}
+	}
+	for _, patch := range kustomize.Patches {
+		if err := c.addKustomizeRef(ctx, sourceRoot, "kustomize.patches.path", patch.Path, false); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // skip reports err unless the collector is best-effort, in which case the

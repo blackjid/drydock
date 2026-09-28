@@ -83,14 +83,17 @@ Ownership follows the local Kustomize input graph, not only
 `apps/demo/overlays/staging` also owns the files that overlay reaches through
 `resources`, `bases`, `components`, `helmCharts.valuesFile`,
 `helmCharts.additionalValuesFiles`, and local patch, generator, and transformer
-paths. Editing `apps/demo/base/helm-release/values.yaml` therefore selects every
+paths, plus the components and patch files the Application adds through
+`spec.source.kustomize.components` and `spec.source.kustomize.patches`.
+Editing `apps/demo/base/helm-release/values.yaml` therefore selects every
 overlay that includes that base. Only sources that render from the local
 checkout contribute: sources fetched from another repository, repo-mapped to
 another checkout, or stored in OCI do not. Remote refs do not add ownership.
 If the Kustomize graph cannot be read, for example because a kustomization
 escapes the repository or fails to parse, the Application keeps only its
 `spec.source.path` ownership. A change only that graph would have owned then
-stays unowned and falls back to rendering all Applications.
+stays unowned and falls back to rendering all Applications. A change another
+Application's graph also reaches selects only that Application.
 
 Path filters are explicit command or workflow policy. Keep filters narrow in
 repositories that use plugins or unusual generation paths, because an ignored

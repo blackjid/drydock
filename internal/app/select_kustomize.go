@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"fmt"
 
 	argoappv1 "github.com/argoproj/argo-cd/v3/pkg/apis/application/v1alpha1"
 	"github.com/sholdee/drydock/internal/ociartifact"
@@ -11,7 +12,8 @@ import (
 
 // withKustomizeSelectionPaths returns copies of inputs whose Paths also carry
 // the local Kustomize graph inputs (bases, components, helmCharts values
-// files, patches, generator files) of every source that renders from root.
+// files, patches, generator files, and spec.source.kustomize components and
+// patches) of every source that renders from root.
 // It exists for changed-only ownership only: ApplicationSelectionInput.Paths
 // from discovery also key the persistent render cache, so the listed inputs
 // are never mutated. A source whose graph cannot be read keeps its
@@ -29,15 +31,30 @@ func withKustomizeSelectionPaths(ctx context.Context, root string, repoMaps []so
 			if !kustomizeSelectionSourceIsLocal(root, resolver, source) {
 				continue
 			}
-			paths, ok := memo[source.Path]
+			key := kustomizeSelectionMemoKey(source)
+			paths, ok := memo[key]
 			if !ok {
-				paths, _ = render.KustomizeSelectionPaths(ctx, root, source.Path)
-				memo[source.Path] = paths
+				paths, _ = render.KustomizeSelectionPaths(ctx, root, source.Path, source.Kustomize)
+				memo[key] = paths
 			}
 			out[i].Paths = append(out[i].Paths, paths...)
 		}
 	}
 	return out
+}
+
+// kustomizeSelectionMemoKey identifies one selection walk: sources sharing a
+// path but adding different spec.source.kustomize components or patches own
+// different inputs.
+func kustomizeSelectionMemoKey(source argoappv1.ApplicationSource) string {
+	var components, patches []string
+	if source.Kustomize != nil {
+		components = source.Kustomize.Components
+		for _, patch := range source.Kustomize.Patches {
+			patches = append(patches, patch.Path)
+		}
+	}
+	return fmt.Sprintf("%q %q %q", source.Path, components, patches)
 }
 
 func applicationSources(app argoappv1.Application) argoappv1.ApplicationSources {
