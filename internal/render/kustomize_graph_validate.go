@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
-	goyaml "go.yaml.in/yaml/v3"
 	"sigs.k8s.io/kustomize/api/types"
 )
 
@@ -17,6 +15,9 @@ type kustomizeGraphValidator struct {
 	allowAcquirableRemoteRefs bool
 	visited                   map[string]struct{}
 	nodes                     []kustomizeGraphNode
+	// pluginReferents, set by render walks only, also checks the files
+	// builtin plugin configs read. Digest and selection walks leave it nil.
+	pluginReferents *kustomizePluginReferentCheck
 }
 
 type kustomizeGraphNode struct {
@@ -25,29 +26,55 @@ type kustomizeGraphNode struct {
 	ManifestPath           string
 	InheritedHelmNamespace string
 	Kustomization          types.Kustomization
+	// PluginInputPaths, filled by render walks, lists the checked
+	// in-repository files the node's builtin plugin configs read and the
+	// directories and resources of its directory entries, for the prepared
+	// workspace to copy.
+	PluginInputPaths []string
 }
 
+// kustomizeGraphWalk selects the policy of one walk of a kustomization
+// graph. Every walk bounds local refs by the repository root it is given.
+type kustomizeGraphWalk struct {
+	// allowAcquirableRemoteRefs leaves remote refs the prepared workspace
+	// can acquire to it; without it every remote ref fails the walk.
+	allowAcquirableRemoteRefs bool
+	// checkPluginReferents also checks the files builtin plugin configs
+	// read and fills each node's PluginInputPaths. Render walks set it;
+	// digest and selection walks do not.
+	checkPluginReferents bool
+}
+
+var (
+	// kustomizeBuildWalk walks the tree krusty builds — the repository on
+	// the plain path, the prepared workspace otherwise — where nothing is
+	// acquired any more.
+	kustomizeBuildWalk = kustomizeGraphWalk{checkPluginReferents: true}
+	// kustomizeRenderWalk walks a tree before the render prepares it: the
+	// repository before the plain or prepared path is chosen, and acquired
+	// remote Git content before it is copied into the workspace.
+	kustomizeRenderWalk = kustomizeGraphWalk{allowAcquirableRemoteRefs: true, checkPluginReferents: true}
+	// kustomizeInputWalk walks a graph for its inputs: digest, changed-only
+	// selection, and the copy of source-level components.
+	kustomizeInputWalk = kustomizeGraphWalk{allowAcquirableRemoteRefs: true}
+)
+
 func validateKustomizeGraph(ctx context.Context, repoRoot, sourceRoot string) (string, error) {
-	manifestPath, _, err := collectKustomizeGraph(ctx, repoRoot, sourceRoot)
+	manifestPath, _, err := collectKustomizeGraph(ctx, repoRoot, sourceRoot, kustomizeBuildWalk)
 	return manifestPath, err
 }
 
-func collectKustomizeGraph(ctx context.Context, repoRoot, sourceRoot string) (string, []kustomizeGraphNode, error) {
-	validator := kustomizeGraphValidator{
-		repoRoot:   filepath.Clean(repoRoot),
-		sourceRoot: filepath.Clean(sourceRoot),
-		visited:    make(map[string]struct{}),
-	}
-	manifestPath, err := validator.validateKustomizationDir(ctx, sourceRoot, "")
-	return manifestPath, validator.nodes, err
-}
-
-func collectKustomizeGraphForPreparation(ctx context.Context, repoRoot, sourceRoot string) (string, []kustomizeGraphNode, error) {
+// collectKustomizeGraph walks the kustomization graph rooted at sourceRoot
+// under walk's policy, with every local ref bounded by repoRoot.
+func collectKustomizeGraph(ctx context.Context, repoRoot, sourceRoot string, walk kustomizeGraphWalk) (string, []kustomizeGraphNode, error) {
 	validator := kustomizeGraphValidator{
 		repoRoot:                  filepath.Clean(repoRoot),
 		sourceRoot:                filepath.Clean(sourceRoot),
-		allowAcquirableRemoteRefs: true,
+		allowAcquirableRemoteRefs: walk.allowAcquirableRemoteRefs,
 		visited:                   make(map[string]struct{}),
+	}
+	if walk.checkPluginReferents {
+		validator.pluginReferents = newKustomizePluginReferentCheck()
 	}
 	manifestPath, err := validator.validateKustomizationDir(ctx, sourceRoot, "")
 	return manifestPath, validator.nodes, err
@@ -80,12 +107,19 @@ func (v *kustomizeGraphValidator) validateKustomizationDir(ctx context.Context, 
 	if err != nil {
 		return "", err
 	}
-	var kustomization types.Kustomization
-	if err := goyaml.Unmarshal(content, &kustomization); err != nil {
-		return "", fmt.Errorf("decode kustomization %s: %w", manifestPath, err)
+	kustomization, err := decodeKustomization(manifestPath, content)
+	if err != nil {
+		return "", err
 	}
 	if err := v.validateKustomization(ctx, filepath.Dir(kustomizationFile), manifestPath, &kustomization, inheritedHelmNamespace); err != nil {
 		return "", err
+	}
+	var pluginInputs []string
+	if v.pluginReferents != nil {
+		pluginInputs, err = v.validatePluginConfigReferents(ctx, filepath.Dir(kustomizationFile), &kustomization)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w", manifestPath, err)
+		}
 	}
 	v.nodes = append(v.nodes, kustomizeGraphNode{
 		Dir:                    filepath.Dir(kustomizationFile),
@@ -93,6 +127,7 @@ func (v *kustomizeGraphValidator) validateKustomizationDir(ctx context.Context, 
 		ManifestPath:           manifestPath,
 		InheritedHelmNamespace: inheritedHelmNamespace,
 		Kustomization:          kustomization,
+		PluginInputPaths:       pluginInputs,
 	})
 	return manifestPath, nil
 }
@@ -135,9 +170,6 @@ func (v *kustomizeGraphValidator) validateKustomization(ctx context.Context, dir
 }
 
 func (v *kustomizeGraphValidator) validateHelmFields(dir string, kustomization *types.Kustomization) error {
-	if len(kustomization.HelmChartInflationGenerator) != 0 {
-		return fmt.Errorf("helmChartInflationGenerator is deprecated and unsupported")
-	}
 	if kustomization.HelmGlobals != nil && kustomization.HelmGlobals.ConfigHome != "" {
 		return fmt.Errorf("helmGlobals.configHome is unsupported")
 	}
@@ -188,12 +220,6 @@ func (v *kustomizeGraphValidator) validateOperandRefs(ctx context.Context, dir s
 	}
 	for _, resource := range kustomization.Resources {
 		if err := v.validateResourceRef(ctx, dir, "resources", resource, childInheritedHelmNamespace); err != nil {
-			return err
-		}
-	}
-
-	for _, base := range kustomization.Bases { //nolint:staticcheck // Kustomize still accepts bases; validate it to block unsafe refs.
-		if err := v.validateKustomizationRef(ctx, dir, "bases", base, childInheritedHelmNamespace); err != nil {
 			return err
 		}
 	}
@@ -374,45 +400,13 @@ func (v *kustomizeGraphValidator) validateGeneratorRefs(dir, field string, sourc
 			return err
 		}
 	}
-	if sources.EnvSource != "" {
-		if err := v.validatePathRef(dir, field+".env", sources.EnvSource); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
+// validateLocalRef checks ref, exactly as written, against the walk's
+// repository root (validateLocalKustomizeRef).
 func (v *kustomizeGraphValidator) validateLocalRef(dir, field, ref string) (string, os.FileInfo, error) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return "", nil, nil
-	}
-	if isRemoteKustomizeRef(ref) {
-		return "", nil, unsupportedRemoteKustomizeRefError(field, ref)
-	}
-	if filepath.IsAbs(ref) {
-		return "", nil, fmt.Errorf("kustomize %s %q must be relative", field, ref)
-	}
-
-	path := filepath.Clean(filepath.Join(dir, filepath.FromSlash(ref)))
-	if err := v.rejectRepoRootEscape("kustomize "+field, path); err != nil {
-		return "", nil, err
-	}
-	if err := rejectSymlinkedPath(v.repoRoot, path); err != nil {
-		return "", nil, fmt.Errorf("kustomize %s %q: %w", field, ref, err)
-	}
-
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return path, nil, nil
-		}
-		return "", nil, err
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return "", nil, fmt.Errorf("kustomize %s %q is a symlink", field, ref)
-	}
-	return path, info, nil
+	return validateLocalKustomizeRef(v.repoRoot, dir, field, ref)
 }
 
 func (v *kustomizeGraphValidator) rejectRepoRootEscape(kind, path string) error {

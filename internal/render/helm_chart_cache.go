@@ -1,6 +1,9 @@
 package render
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -20,7 +23,10 @@ type HelmChartLoadCache struct {
 }
 
 type helmChartCacheEntry struct {
-	once        sync.Once
+	once sync.Once
+	// hasGit records that the chart tree holds a .git entry, so every load
+	// reads a copy without it (loadHelmChartDir).
+	hasGit      bool
 	files       []helmChartRawFile
 	cacheable   bool
 	validateErr error
@@ -50,11 +56,11 @@ func (cache *HelmChartLoadCache) Load(chartPath string) (helmchart.Charter, erro
 	cache.mu.Unlock()
 
 	entry.once.Do(func() {
-		entry.validateErr = validateHelmChartTree(chartPath)
+		entry.hasGit, entry.validateErr = validateHelmChartTree(chartPath)
 		if entry.validateErr != nil {
 			return
 		}
-		loaded, err := loader.Load(chartPath)
+		loaded, err := loadHelmChartDir(chartPath, entry.hasGit)
 		if err != nil {
 			entry.loadErr = err
 			return
@@ -73,16 +79,39 @@ func (cache *HelmChartLoadCache) Load(chartPath string) (helmchart.Charter, erro
 		return nil, entry.loadErr
 	}
 	if !entry.cacheable {
-		return loader.Load(chartPath)
+		return loadHelmChartDir(chartPath, entry.hasGit)
 	}
 	return chartv2loader.LoadFiles(bufferedFilesFromRawFiles(entry.files))
 }
 
 func loadValidatedHelmChart(chartPath string) (helmchart.Charter, error) {
-	if err := validateHelmChartTree(chartPath); err != nil {
+	hasGit, err := validateHelmChartTree(chartPath)
+	if err != nil {
 		return nil, err
 	}
-	return loader.Load(chartPath)
+	return loadHelmChartDir(chartPath, hasGit)
+}
+
+// loadHelmChartDir loads the chart directory at chartPath. When the tree
+// holds a .git entry (validateHelmChartTree) it loads a temporary copy made
+// by copyRegularTree, which leaves out .git at every depth and refuses
+// symlinks, so no .Files lookup can reach repository metadata. A chart at a
+// repository root keeps rendering. Helm reads the whole chart into memory,
+// so the copy is removed before returning.
+func loadHelmChartDir(chartPath string, hasGit bool) (helmchart.Charter, error) {
+	if !hasGit {
+		return loader.Load(chartPath)
+	}
+	tempDir, err := os.MkdirTemp("", "drydock-helm-chart-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temporary helm chart copy: %w", err)
+	}
+	defer func() { _ = os.RemoveAll(tempDir) }()
+	chartCopy := filepath.Join(tempDir, "chart")
+	if err := copyRegularTree(chartPath, chartCopy); err != nil {
+		return nil, fmt.Errorf("copy helm chart without .git: %w", err)
+	}
+	return loader.Load(chartCopy)
 }
 
 func rawFilesFromV2Chart(chart *chartv2.Chart) []helmChartRawFile {

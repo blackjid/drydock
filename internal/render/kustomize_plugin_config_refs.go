@@ -29,12 +29,12 @@ type kustomizePluginConfigRef struct {
 	Kind string
 	// Field names the config field, e.g. path or replacements.path.
 	Field string
-	// Path is the referent as written, trimmed, never empty.
+	// Path is the referent exactly as the plugin reads it, never empty.
 	Path string
 }
 
-// rawPluginReferent is one referent as a builtin plugin's config writes it,
-// before kustomizePluginConfigRefs trims it and drops it when empty.
+// rawPluginReferent is one referent as a builtin plugin reads it, before
+// kustomizePluginConfigRefs drops it when empty.
 type rawPluginReferent struct {
 	field string
 	path  string
@@ -50,7 +50,10 @@ type pluginReferentExtractor func(content []byte) ([]rawPluginReferent, error)
 // Generate reads through the loader; nil means the kind reads no files.
 // Extractors decode with sigs.k8s.io/yaml into structs mirroring the plugin's
 // json tags — the same decoder the plugins' Config uses, so keys match with
-// the same case-insensitive JSON semantics.
+// the same case-insensitive JSON semantics — and derive each path the way
+// the plugin does. Both the digest walk and the render walk's referent check
+// (validatePluginConfigResources) use them, so the digest collects exactly
+// the files render reads.
 var builtinPluginReferentExtractors = map[string]pluginReferentExtractor{
 	"AnnotationsTransformer":  nil,
 	"HashTransformer":         nil,
@@ -82,8 +85,9 @@ var builtinPluginReferentExtractors = map[string]pluginReferentExtractor{
 // HelmChartInflationGenerator (rendering runs builtins with Helm disabled),
 // an unknown builtin kind, or a non-builtin exec/container/Go plugin — is an
 // error: its inputs cannot be enumerated, so it must not key a cache entry.
-// Referents are trimmed and empty ones dropped: an inline replacement has no
-// path, and a generator often lists no files.
+// Referents are kept exactly as the plugin reads them (kustomize never trims
+// a path) and empty ones dropped: an inline replacement has no path, and a
+// generator often lists no files.
 func kustomizePluginConfigRefs(docs []*goyaml.Node) ([]kustomizePluginConfigRef, error) {
 	var refs []kustomizePluginConfigRef
 	for _, doc := range docs {
@@ -124,7 +128,7 @@ func isEmptyPluginConfigDocument(root *goyaml.Node) bool {
 	return (root.Kind == goyaml.MappingNode || root.Kind == goyaml.SequenceNode) && len(root.Content) == 0
 }
 
-// builtinPluginDocumentRefs returns the trimmed, non-empty referents of one
+// builtinPluginDocumentRefs returns the non-empty referents of one
 // apiVersion: builtin document of the given kind.
 func builtinPluginDocumentRefs(kind string, root *goyaml.Node) ([]kustomizePluginConfigRef, error) {
 	if kind == "HelmChartInflationGenerator" {
@@ -147,13 +151,22 @@ func builtinPluginDocumentRefs(kind string, root *goyaml.Node) ([]kustomizePlugi
 	}
 	refs := make([]kustomizePluginConfigRef, 0, len(referents))
 	for _, referent := range referents {
-		path := strings.TrimSpace(referent.path)
-		if path == "" {
+		if referent.path == "" {
 			continue
 		}
-		refs = append(refs, kustomizePluginConfigRef{Kind: kind, Field: referent.field, Path: path})
+		refs = append(refs, kustomizePluginConfigRef{Kind: kind, Field: referent.field, Path: referent.path})
 	}
 	return refs, nil
+}
+
+// builtinPluginReferents returns the referents of one builtin config
+// document of a known kind; a kind that reads no files has none.
+func builtinPluginReferents(kind string, content []byte) ([]rawPluginReferent, error) {
+	extract := builtinPluginReferentExtractors[kind]
+	if extract == nil {
+		return nil, nil
+	}
+	return extract(content)
 }
 
 func extractPatchReferents(content []byte) ([]rawPluginReferent, error) {
@@ -168,7 +181,7 @@ func extractPatchReferents(content []byte) ([]rawPluginReferent, error) {
 
 // extractPatchStrategicMergeReferents skips paths: entries holding patch
 // content — the plugin's legacy form tries each entry as content before
-// treating it as a file (loadFromPaths).
+// treating it as a file (loadFromPaths; isInlineStrategicMergePatch).
 func extractPatchStrategicMergeReferents(content []byte) ([]rawPluginReferent, error) {
 	var config struct {
 		Paths []types.PatchStrategicMerge `json:"paths,omitempty"`
@@ -201,10 +214,13 @@ func extractReplacementReferents(content []byte) ([]rawPluginReferent, error) {
 }
 
 // extractKvGeneratorReferents covers ConfigMapGenerator and SecretGenerator:
-// files: (a key= prefix stripped) and envs:, read through kv.NewLoader over
-// the plugin loader at Generate time. The singular env: is NOT a referent of
-// a plugin config: only FixKustomization merges it into envs:, for
-// kustomization-level generators, and kv.Load reads EnvSources alone — a
+// files: and envs:, read through kv.NewLoader over the plugin loader at
+// Generate time. A files: entry is split the way generators.ParseFileSource
+// splits it: no "=" makes the whole entry the path; exactly one "=" inside
+// makes the path what follows it (a URL's query "=" included); any other
+// "=" fails the plugin before it reads anything. The singular env: is NOT a
+// referent of a plugin config: only FixKustomization merges it into envs:,
+// for kustomization-level generators, and kv.Load reads EnvSources alone — a
 // builtin config's env: file is never read.
 func extractKvGeneratorReferents(content []byte) ([]rawPluginReferent, error) {
 	var config types.KvPairSources
@@ -213,7 +229,13 @@ func extractKvGeneratorReferents(content []byte) ([]rawPluginReferent, error) {
 	}
 	out := make([]rawPluginReferent, 0, len(config.FileSources)+len(config.EnvSources))
 	for _, source := range config.FileSources {
-		out = append(out, rawPluginReferent{field: "files", path: generatorFileSourcePath(source)})
+		switch separators := strings.Count(source, "="); {
+		case separators == 0:
+			out = append(out, rawPluginReferent{field: "files", path: source})
+		case separators == 1 && !strings.HasPrefix(source, "=") && !strings.HasSuffix(source, "="):
+			_, path, _ := strings.Cut(source, "=")
+			out = append(out, rawPluginReferent{field: "files", path: path})
+		}
 	}
 	for _, source := range config.EnvSources {
 		out = append(out, rawPluginReferent{field: "envs", path: source})
@@ -241,8 +263,9 @@ func extractValueAddReferents(content []byte) ([]rawPluginReferent, error) {
 // strict digest walk and is skipped by a best-effort one, which keeps the
 // entry itself.
 func (c *kustomizeInputCollector) collectPluginConfigEntry(ctx context.Context, dir, field, ref string) error {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
+	// A blank entry is an empty inline document to kustomize: nothing is
+	// read. Any other entry is used exactly as written.
+	if strings.TrimSpace(ref) == "" {
 		return nil
 	}
 	if docs, inline := inlineKustomizeGeneratorDocuments(ref); inline {
@@ -285,10 +308,9 @@ func (c *kustomizeInputCollector) collectPluginConfigReferents(ctx context.Conte
 // rejected rather than collected: either would own the listing directory
 // whole — at the repository root, every path.
 func (c *kustomizeInputCollector) addPluginConfigReferent(ctx context.Context, dir, field, ref string) error {
-	// Defense in depth: kustomizePluginConfigRefs already trims and drops
-	// empty referents, but addLocalRef has no empty check of its own and
-	// this is the last guard before the listing directory gets owned.
-	ref = strings.TrimSpace(ref)
+	// Defense in depth: kustomizePluginConfigRefs already drops empty
+	// referents, but addLocalRef has no empty check of its own and this is
+	// the last guard before the listing directory gets owned.
 	if ref == "" {
 		return nil
 	}
@@ -342,13 +364,13 @@ func (c *kustomizeInputCollector) pluginConfigEntryDocuments(ctx context.Context
 // kustomization files and resources join the collection; the configs'
 // referents still resolve against the outer listing directory.
 func (c *kustomizeInputCollector) pluginConfigDirectoryDocuments(ctx context.Context, field, ref, path string) ([]*goyaml.Node, error) {
-	_, graph, err := collectKustomizeGraphForPreparation(ctx, c.repoRoot, path)
+	_, graph, err := collectKustomizeGraph(ctx, c.repoRoot, path, kustomizeInputWalk)
 	if err != nil {
 		return nil, fmt.Errorf("kustomize %s %q: %w", field, ref, err)
 	}
 	for _, node := range graph {
 		if err := requirePlainResourcesKustomization(node); err != nil {
-			return nil, fmt.Errorf("kustomize %s %q: %w", field, ref, err)
+			return nil, fmt.Errorf("kustomize %s %q: %w, so its plugin config documents cannot be enumerated", field, ref, err)
 		}
 	}
 	var docs []*goyaml.Node
@@ -379,7 +401,7 @@ func requirePlainResourcesKustomization(node kustomizeGraphNode) error {
 		if isUnsetKustomizationField(field) {
 			continue
 		}
-		return fmt.Errorf("%s sets fields other than resources, so its plugin config documents cannot be enumerated", node.ManifestPath)
+		return fmt.Errorf("%s sets fields other than resources", node.ManifestPath)
 	}
 	return nil
 }
@@ -395,7 +417,6 @@ func isUnsetKustomizationField(field reflect.Value) bool {
 // kustomization. Directories are graph nodes of their own and contribute
 // through their own resources.
 func (c *kustomizeInputCollector) plainResourceDocuments(dir, field, resource string) ([]*goyaml.Node, error) {
-	resource = strings.TrimSpace(resource)
 	if resource == "" {
 		return nil, nil
 	}

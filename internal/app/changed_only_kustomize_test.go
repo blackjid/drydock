@@ -60,6 +60,21 @@ data:
 `)
 }
 
+// writeCapitalizedKeyOverlayApps is the plain base with production's overlay
+// spelling its key Resources:, which kustomize reads as resources:. Staging's
+// lowercase overlay owns the base too, so production is selected only if its
+// own graph reads the capitalized key.
+func writeCapitalizedKeyOverlayApps(t *testing.T, root, value string) {
+	t.Helper()
+	writeKustomizePlainBaseApps(t, root, value)
+	writeTestFile(t, filepath.Join(root, "workloads", "demo", "overlays", "production", "kustomization.yaml"), `apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: demo-production
+Resources:
+  - ../../base
+`)
+}
+
 // writeKustomizeOverlayApps writes the overlay -> base -> helmCharts.valuesFile
 // layout: the Helm values live under the shared base.
 func writeKustomizeOverlayApps(t *testing.T, root, value string) {

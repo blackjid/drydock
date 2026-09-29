@@ -28,7 +28,7 @@ func KustomizeInputDigestPaths(ctx context.Context, source ResolvedSource, opts 
 	if err != nil {
 		return nil, err
 	}
-	_, graph, err := collectKustomizeGraphForPreparation(ctx, source.RepoRoot, root)
+	_, graph, err := collectKustomizeGraph(ctx, source.RepoRoot, root, kustomizeInputWalk)
 	if err != nil {
 		return nil, err
 	}
@@ -71,7 +71,7 @@ func KustomizeSelectionPaths(ctx context.Context, repoRoot, sourcePath string, k
 	if err != nil {
 		return nil, err
 	}
-	_, graph, err := collectKustomizeGraphForPreparation(ctx, repoRoot, root)
+	_, graph, err := collectKustomizeGraph(ctx, repoRoot, root, kustomizeInputWalk)
 	if err != nil {
 		return nil, err
 	}
@@ -109,12 +109,11 @@ func (c *kustomizeInputCollector) collectSourceKustomizeRefs(ctx context.Context
 		if err := c.addKustomizeRef(ctx, sourceRoot, "kustomize.components", component, false); err != nil {
 			return err
 		}
-		component = strings.TrimSpace(component)
 		if component == "" || isRemoteKustomizeRef(component) || filepath.IsAbs(component) {
 			continue
 		}
 		componentRoot := filepath.Clean(filepath.Join(sourceRoot, filepath.FromSlash(component)))
-		_, graph, err := collectKustomizeGraphForPreparation(ctx, c.repoRoot, componentRoot)
+		_, graph, err := collectKustomizeGraph(ctx, c.repoRoot, componentRoot, kustomizeInputWalk)
 		if err != nil {
 			if err := c.skip(ctx, err); err != nil {
 				return err
@@ -207,7 +206,6 @@ func (c *kustomizeInputCollector) collectHelmRefs(ctx context.Context, dir strin
 }
 
 func (c *kustomizeInputCollector) collectHelmValueRef(ctx context.Context, dir, field, ref string) error {
-	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil
 	}
@@ -220,11 +218,6 @@ func (c *kustomizeInputCollector) collectHelmValueRef(ctx context.Context, dir, 
 func (c *kustomizeInputCollector) collectOperandRefs(ctx context.Context, dir string, kustomization types.Kustomization) error {
 	for _, resource := range kustomization.Resources {
 		if err := c.addKustomizeRef(ctx, dir, "resources", resource, false); err != nil {
-			return err
-		}
-	}
-	for _, base := range kustomization.Bases { //nolint:staticcheck // Kustomize still accepts bases.
-		if err := c.addKustomizeRef(ctx, dir, "bases", base, false); err != nil {
 			return err
 		}
 	}
@@ -301,8 +294,9 @@ func (c *kustomizeInputCollector) collectPatchRefs(ctx context.Context, dir stri
 // (collectPluginConfigEntry), plus the files: referents of its KSOPS
 // documents.
 func (c *kustomizeInputCollector) collectGeneratorManifestRef(ctx context.Context, dir, ref string) error {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
+	// A blank entry is an empty inline document to kustomize: nothing is
+	// read. Any other entry is used exactly as written.
+	if strings.TrimSpace(ref) == "" {
 		return nil
 	}
 	if err := c.collectKSOPSGeneratorFileRefs(ctx, dir, ref); err != nil {
@@ -349,11 +343,13 @@ func (c *kustomizeInputCollector) collectGeneratorRefs(ctx context.Context, dir 
 			return err
 		}
 	}
-	return c.addKustomizeRef(ctx, dir, "generator.env", sources.EnvSource, false)
+	return nil
 }
 
+// addKustomizeRef adds one ref a kustomization reads, resolved exactly as
+// written like render resolves it (validateLocalKustomizeRef): the digest
+// must record the file kustomize reads, and "cm.yaml " is not "cm.yaml".
 func (c *kustomizeInputCollector) addKustomizeRef(ctx context.Context, dir, field, ref string, optional bool) error {
-	ref = strings.TrimSpace(ref)
 	if ref == "" {
 		return nil
 	}

@@ -159,12 +159,28 @@ type helmCRDObjectProvider interface {
 	CRDObjects() []chartv2.CRD
 }
 
-func validateHelmChartTree(root string) error {
-	return filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+// validateHelmChartTree rejects symlinks anywhere in the chart directory and
+// reports whether the tree holds a .git entry (case-insensitively, at any
+// depth), which it does not descend into. Helm's directory loader reads every
+// file of the chart into .Files — its default ignore rules spare only
+// templates/.?*, and .helmignore is the chart author's — so a chart that is a
+// repository root (path: .) would expose .git/config, where actions/checkout
+// persists its token, to {{ .Files.Get }} and .Files.Glob. Such a chart is
+// loaded from a copy without .git (loadHelmChartDir).
+func validateHelmChartTree(root string) (bool, error) {
+	hasGit := false
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if path == root {
+			return nil
+		}
+		if strings.EqualFold(entry.Name(), ".git") {
+			hasGit = true
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
 			return nil
 		}
 		if entry.Type()&os.ModeSymlink != 0 {
@@ -176,6 +192,7 @@ func validateHelmChartTree(root string) error {
 		}
 		return nil
 	})
+	return hasGit, err
 }
 
 func decodeHelmManifests(pathMap map[string]string, chrt helmchart.Charter, rendered map[string]string, opts RenderOptions) ([]Manifest, []diagnostic.Diagnostic, error) {

@@ -177,9 +177,11 @@ func TestKustomizePluginConfigRefs(t *testing.T) {
 			config: "apiVersion: builtin\nkind: PatchTransformer\npatch: |\n  - op: add\n    path: /metadata/labels/a\n    value: b\n",
 		},
 		{
-			name:   "PatchJson6902Transformer path",
+			// Kustomize reads a path exactly as written: " ops.yaml " names
+			// the file " ops.yaml ", so the digest must too.
+			name:   "PatchJson6902Transformer path kept as written",
 			config: "apiVersion: builtin\nkind: PatchJson6902Transformer\npath: ' ops.yaml '\n",
-			want:   []kustomizePluginConfigRef{{Kind: "PatchJson6902Transformer", Field: "path", Path: "ops.yaml"}},
+			want:   []kustomizePluginConfigRef{{Kind: "PatchJson6902Transformer", Field: "path", Path: " ops.yaml "}},
 		},
 		{
 			name:   "PatchStrategicMergeTransformer paths skip inline content",

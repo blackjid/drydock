@@ -183,6 +183,52 @@ func TestRenderInputCoverageKustomizeSourceWithBaseAndOverride(t *testing.T) {
 	assertRenderInputCoverage(t, repoRoot, application)
 }
 
+// TestRenderInputCoverageKustomizeCapitalizedKeys pins that files named under
+// a capitalized kustomization key, which kustomize matches case-insensitively,
+// are covered by the persistent render cache digest.
+func TestRenderInputCoverageKustomizeCapitalizedKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		files map[string]string
+	}{
+		{
+			name: "Resources",
+			files: map[string]string{
+				"base/kustomization.yaml":          "resources:\n  - cm.yaml\n",
+				"base/cm.yaml":                     renderCoverageDemoConfigMap,
+				"manifests/app/kustomization.yaml": "Resources:\n  - ../../base\n",
+			},
+		},
+		{
+			name: "Transformers",
+			files: map[string]string{
+				"manifests/app/kustomization.yaml": "resources:\n  - cm.yaml\nTransformers:\n  - transformer.yaml\n",
+				"manifests/app/cm.yaml":            renderCoverageDemoConfigMap,
+				"manifests/app/transformer.yaml":   "apiVersion: builtin\nkind: PatchTransformer\nmetadata:\n  name: patch\npath: patch.yaml\ntarget:\n  kind: ConfigMap\n  name: demo\n",
+				"manifests/app/patch.yaml":         renderCoveragePatchedConfigMap,
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			for name, content := range tt.files {
+				writeTestFile(t, filepath.Join(repoRoot, filepath.FromSlash(name)), content)
+			}
+			writeTestFile(t, filepath.Join(repoRoot, "unrelated", "README.md"), "not a render input\n")
+			application := argoappv1.Application{
+				Name: "app", Namespace: "argocd",
+				Spec: argoappv1.ApplicationSpec{
+					Source: &argoappv1.ApplicationSource{
+						RepoURL: "https://git.example.test/org/repo.git", Path: "manifests/app", TargetRevision: "main",
+					},
+					Destination: argoappv1.ApplicationDestination{Namespace: "default"},
+				},
+			}
+			assertRenderInputCoverage(t, repoRoot, application)
+		})
+	}
+}
+
 func TestRenderInputCoverageHelmSource(t *testing.T) {
 	repoRoot := t.TempDir()
 	writeTestFile(t, repoRoot+"/charts/demo/Chart.yaml", "apiVersion: v2\nname: demo\nversion: 0.1.0\n")

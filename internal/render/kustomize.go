@@ -40,7 +40,7 @@ func (KustomizeRenderer) Render(ctx context.Context, source ResolvedSource, opts
 		return nil, nil, err
 	}
 
-	_, graph, err := collectKustomizeGraphForPreparation(ctx, source.RepoRoot, root)
+	_, graph, err := collectKustomizeGraph(ctx, source.RepoRoot, root, kustomizeRenderWalk)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -120,10 +120,6 @@ func hasAcquirableRemoteKustomizeGraphRefs(graph []kustomizeGraphNode) bool {
 		if slices.ContainsFunc(node.Kustomization.Resources, isAcquirableRemoteKustomizeResource) {
 			return true
 		}
-
-		if slices.ContainsFunc(node.Kustomization.Bases, isAcquirableRemoteKustomizeResource) { //nolint:staticcheck // Kustomize still accepts bases; scan it for remote refs.
-			return true
-		}
 		if slices.ContainsFunc(node.Kustomization.Components, isAcquirableRemoteKustomizeResource) {
 			return true
 		}
@@ -196,10 +192,7 @@ func hasAcquirableRemoteGeneratorRefs(sources types.KvPairSources) bool {
 			return true
 		}
 	}
-	if slices.ContainsFunc(sources.EnvSources, isAcquirableRemoteKustomizePathRef) {
-		return true
-	}
-	return isAcquirableRemoteKustomizePathRef(sources.EnvSource)
+	return slices.ContainsFunc(sources.EnvSources, isAcquirableRemoteKustomizePathRef)
 }
 
 func isAcquirableRemoteKustomizePathRef(ref string) bool {

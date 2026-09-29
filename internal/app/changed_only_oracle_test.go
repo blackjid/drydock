@@ -124,6 +124,7 @@ func TestChangedOnlyMatchesFullDiff(t *testing.T) {
 		{name: "source kustomize components", setup: pathPairOracleSetup(writeSourceKustomizeComponentApps, "old", "new", DiscoveryOptions{}), wantApplications: []string{"demo-production", "demo-staging"}},
 		{name: "avp plugin source", setup: pathPairOracleSetup(writeAVPPluginOverlayApps, "old", "new", DiscoveryOptions{}), wantApplications: []string{"demo-production", "demo-staging"}},
 		{name: "native kustomize plugin", setup: pathPairOracleSetup(writeNativeKustomizePluginOverlayApps, "old", "new", DiscoveryOptions{}), wantApplications: []string{"demo-production", "demo-staging"}},
+		{name: "capitalized overlay key", setup: pathPairOracleSetup(writeCapitalizedKeyOverlayApps, "old", "new", DiscoveryOptions{}), wantApplications: []string{"demo-production", "demo-staging"}},
 		// Helm local value files and file parameters.
 		{name: "escaped value file", setup: pathPairOracleSetup(writeHelmEscapedValueFileApps, "old", "new", DiscoveryOptions{}), wantApplications: []string{"web-prod"}},
 		{name: "escaped file parameter", setup: pathPairOracleSetup(writeHelmEscapedFileParameterApps, "old", "new", DiscoveryOptions{}), wantApplications: []string{"web-prod"}},

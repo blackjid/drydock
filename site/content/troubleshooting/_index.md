@@ -96,11 +96,19 @@ Two remediations:
    can learn the default-branch name — `git clone` sets it, and the pr-action
    records the pull request's base branch there whenever a base ref is known
    (pull-request events, or an explicit `base-ref` input). For bare
-   `actions/checkout`-style checkouts outside the pr-action, run:
+   `actions/checkout`-style checkouts outside the pr-action, set it from the
+   default branch the workflow already knows:
 
-   ```bash
-   git remote set-head origin -a
+   ```yaml
+   - run: >-
+       git remote set-head origin
+       "${{ github.event.repository.default_branch }}"
    ```
+
+   That is local-only but needs `refs/remotes/origin/<default-branch>`, which
+   a `fetch-depth: 0` checkout provides. `git remote set-head origin -a`
+   queries the remote instead, so it needs credentials that a checkout with
+   `persist-credentials: false` does not leave behind.
 
    Without that symref, sources pinned to the default-branch name acquire
    remotely — drydock never guesses the default branch from

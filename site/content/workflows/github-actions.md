@@ -56,6 +56,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          # drydock never needs the job token; keep it out of .git/config.
+          persist-credentials: false
       - uses: sholdee/drydock/setup-action@main
         with:
           version: vX.Y.Z

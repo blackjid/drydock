@@ -11,6 +11,7 @@ import (
 	argoglob "github.com/argoproj/argo-cd/v3/util/glob"
 	"github.com/sholdee/drydock/internal/diagnostic"
 	"github.com/sholdee/drydock/internal/manifest"
+	"github.com/sholdee/drydock/internal/pathsafety"
 )
 
 type DirectoryRenderer struct{}
@@ -191,7 +192,9 @@ func shouldSkipDirectoryCandidate(root, path string, entry os.DirEntry, opts Ren
 	if path == root {
 		return false
 	}
-	if entry.Name() == drydockCacheMetadataDirName {
+	// Repository metadata is never a manifest; sourceRoot already refuses a
+	// source path inside .git.
+	if entry.Name() == drydockCacheMetadataDirName || strings.EqualFold(entry.Name(), ".git") {
 		return true
 	}
 	return !opts.DirectoryRecurse
@@ -225,6 +228,9 @@ func cleanSourcePath(path string) (string, error) {
 	clean := filepath.Clean(path)
 	if clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("source path %q escapes repository root", path)
+	}
+	if pathsafety.RelEntersGit(clean) {
+		return "", gitPathRefError("source path", path)
 	}
 	return clean, nil
 }

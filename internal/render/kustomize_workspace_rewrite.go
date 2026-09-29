@@ -180,15 +180,6 @@ func (w *kustomizeWorkspace) rewriteKustomizeGeneratorRefs(ctx context.Context, 
 			out.EnvSources[i] = rewritten
 		}
 	}
-	if sources.EnvSource != "" {
-		rewritten, ok, err := w.rewriteKustomizePathRef(ctx, node, field+".env", sources.EnvSource, remotePathFile)
-		if err != nil {
-			return types.KvPairSources{}, err
-		}
-		if ok {
-			out.EnvSource = rewritten
-		}
-	}
 	return out, nil
 }
 

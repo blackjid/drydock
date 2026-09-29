@@ -627,9 +627,9 @@ metadata:
   name: demo
 `)
 	writeFile(t, filepath.Join(root, "hack", "large-unrelated-artifact.txt"), "not needed\n")
-	_, graph, err := collectKustomizeGraphForPreparation(context.Background(), root, sourceRoot)
+	_, graph, err := collectKustomizeGraph(context.Background(), root, sourceRoot, kustomizeInputWalk)
 	if err != nil {
-		t.Fatalf("collectKustomizeGraphForPreparation() error = %v", err)
+		t.Fatalf("collectKustomizeGraph() error = %v", err)
 	}
 
 	dst := filepath.Join(t.TempDir(), "repo")
@@ -662,9 +662,9 @@ kind: ConfigMap
 metadata:
   name: demo
 `)
-	_, graph, err := collectKustomizeGraphForPreparation(context.Background(), root, sourceRoot)
+	_, graph, err := collectKustomizeGraph(context.Background(), root, sourceRoot, kustomizeInputWalk)
 	if err != nil {
-		t.Fatalf("collectKustomizeGraphForPreparation() error = %v", err)
+		t.Fatalf("collectKustomizeGraph() error = %v", err)
 	}
 
 	dst := filepath.Join(t.TempDir(), "repo")

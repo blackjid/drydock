@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/sholdee/drydock/internal/pathsafety"
 	"github.com/sholdee/drydock/internal/remote"
 	"go.yaml.in/yaml/v3"
 	"helm.sh/helm/v4/pkg/chart/common"
@@ -171,6 +172,9 @@ func (c *helmLocalInputCollector) collectGlob(pattern string) error {
 		return fmt.Errorf("helm value file glob %q matched no files", pattern)
 	}
 	for _, match := range matches {
+		if pathEntersGit(root, match) {
+			return fmt.Errorf("helm value file glob %q matched %q, which enters a .git directory", pattern, displayHelmValueGlobMatch(root, match, pattern))
+		}
 		identity, err := localHelmValueFileIdentity(root, match, pattern)
 		if err != nil {
 			return err
@@ -399,6 +403,9 @@ func (l *helmValueFileLoader) loadGlob(pattern string) ([]loadedHelmValueFile, e
 	}
 	out := make([]loadedHelmValueFile, 0, len(matches))
 	for _, match := range matches {
+		if pathEntersGit(root, match) {
+			return nil, fmt.Errorf("helm value file glob %q matched %q, which enters a .git directory", pattern, displayHelmValueGlobMatch(root, match, pattern))
+		}
 		identity, err := localHelmValueFileIdentity(root, match, pattern)
 		if err != nil {
 			return nil, err
@@ -670,6 +677,9 @@ func resolveHelmValueFileUnderRoot(root, file, display string) (string, string, 
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("helm value file %q escapes value files root", display)
 	}
+	if pathsafety.RelEntersGit(rel) {
+		return "", "", gitPathRefError("helm value file", display)
+	}
 	return root, resolved, nil
 }
 
@@ -685,6 +695,9 @@ func resolveHelmValueFileUnderBoundary(baseRoot, boundaryRoot, file, display str
 	rel, err := filepath.Rel(boundaryRoot, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", "", fmt.Errorf("helm value file %q escapes value files boundary", display)
+	}
+	if pathsafety.RelEntersGit(rel) {
+		return "", "", gitPathRefError("helm value file", display)
 	}
 	return boundaryRoot, resolved, nil
 }

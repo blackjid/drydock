@@ -10,8 +10,17 @@ import (
 	"sigs.k8s.io/kustomize/api/types"
 )
 
-func validateWorkspaceLocalRef(boundaryRoot, dir, field, ref string) (string, os.FileInfo, error) {
-	ref = strings.TrimSpace(ref)
+// validateLocalKustomizeRef is the one boundary check for a local ref a
+// kustomization reads: every graph walk and the prepared workspace use it.
+// It resolves ref against dir exactly as written, because kustomize never
+// trims a path: "base " names the directory "base ", not "base", and a
+// check of the trimmed name would validate a file kustomize never reads.
+// Only an empty ref is skipped. Remote detection may trim (it only widens
+// what counts as remote, and a remote ref is rejected or acquired and
+// rewritten, so kustomize never reads the padded string). The resolved
+// path must stay inside boundaryRoot, must not enter a .git directory, and
+// must not pass through a symlink.
+func validateLocalKustomizeRef(boundaryRoot, dir, field, ref string) (string, os.FileInfo, error) {
 	if ref == "" {
 		return "", nil, nil
 	}
@@ -25,6 +34,9 @@ func validateWorkspaceLocalRef(boundaryRoot, dir, field, ref string) (string, os
 	path := filepath.Clean(filepath.Join(dir, filepath.FromSlash(ref)))
 	if err := rejectPathOutsideBoundary("kustomize "+field, path, boundaryRoot); err != nil {
 		return "", nil, err
+	}
+	if pathEntersGit(boundaryRoot, path) {
+		return "", nil, gitPathRefError("kustomize "+field, ref)
 	}
 	if err := rejectSymlinkedPath(boundaryRoot, path); err != nil {
 		return "", nil, fmt.Errorf("kustomize %s %q: %w", field, ref, err)
@@ -43,9 +55,6 @@ func validateWorkspaceLocalRef(boundaryRoot, dir, field, ref string) (string, os
 }
 
 func validateWorkspaceHelmFields(boundaryRoot, dir string, kustomization *types.Kustomization) error {
-	if len(kustomization.HelmChartInflationGenerator) != 0 {
-		return fmt.Errorf("helmChartInflationGenerator is deprecated and unsupported")
-	}
 	if kustomization.HelmGlobals != nil && kustomization.HelmGlobals.ConfigHome != "" {
 		return fmt.Errorf("helmGlobals.configHome is unsupported")
 	}
@@ -84,6 +93,9 @@ func validateWorkspaceHelmChartPath(boundaryRoot, dir, chartHome string, helmCha
 	localChartPath := filepath.Clean(filepath.Join(dir, filepath.FromSlash(chartHome), chartPath))
 	if err := rejectPathOutsideBoundary("kustomize helmCharts.name", localChartPath, boundaryRoot); err != nil {
 		return err
+	}
+	if pathEntersGit(boundaryRoot, localChartPath) {
+		return gitPathRefError("kustomize helmCharts.name", helmChart.Name)
 	}
 	if err := rejectSymlinkedPath(boundaryRoot, localChartPath); err != nil {
 		return fmt.Errorf("kustomize helmCharts.name %q: %w", helmChart.Name, err)
@@ -218,16 +230,11 @@ func validateWorkspaceGeneratorRefs(boundaryRoot, dir, field string, sources typ
 			return err
 		}
 	}
-	if sources.EnvSource != "" {
-		if err := validateWorkspacePathRef(boundaryRoot, dir, field+".env", sources.EnvSource); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
 func validateWorkspacePathRef(boundaryRoot, dir, field, ref string) error {
-	_, _, err := validateWorkspaceLocalRef(boundaryRoot, dir, field, ref)
+	_, _, err := validateLocalKustomizeRef(boundaryRoot, dir, field, ref)
 	return err
 }
 
@@ -237,6 +244,19 @@ func rejectPathOutsideBoundary(kind, path, boundaryRoot string) error {
 		return fmt.Errorf("%s %q escapes repository root %q", kind, path, boundaryRoot)
 	}
 	return nil
+}
+
+// pathEntersGit reports whether path, relative to root, enters a .git
+// directory or names a .git file (case-insensitively; see
+// pathsafety.RelEntersGit). Render input never lives there, and a .git
+// directory can hold credentials.
+func pathEntersGit(root, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
+	return err == nil && pathsafety.RelEntersGit(rel)
+}
+
+func gitPathRefError(kind, ref string) error {
+	return fmt.Errorf("%s %q enters a .git directory", kind, ref)
 }
 
 func rejectSymlinkedPath(root, path string) error {

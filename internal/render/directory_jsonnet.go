@@ -78,6 +78,9 @@ func resolveJsonnetLib(repoRoot, raw string) (string, error) {
 	if pathsafety.RelEscapes(clean) {
 		return "", fmt.Errorf("jsonnet lib %q escapes repository root", raw)
 	}
+	if pathsafety.RelEntersGit(clean) {
+		return "", gitPathRefError("jsonnet lib", raw)
+	}
 	resolved := filepath.Join(repoRoot, clean)
 	if err := rejectPathOutsideBoundary("jsonnet lib", resolved, repoRoot); err != nil {
 		return "", err
@@ -200,6 +203,9 @@ func (i *boundedJsonnetImporter) rootFor(path string) (string, bool, error) {
 }
 
 func (i *boundedJsonnetImporter) tryImport(root, path string) (jsonnet.Contents, bool, error) {
+	if pathEntersGit(root, path) {
+		return jsonnet.Contents{}, false, fmt.Errorf("jsonnet import %q enters a .git directory", path)
+	}
 	if err := rejectSymlinkedPath(root, path); err != nil {
 		return jsonnet.Contents{}, false, err
 	}

@@ -16,6 +16,21 @@ func SlashRelEscapes(rel string) bool {
 	return rel == ".." || strings.HasPrefix(rel, "../")
 }
 
+// RelEntersGit reports whether any component of the OS-relative path rel is
+// ".git", compared case-insensitively: on case-insensitive filesystems
+// (macOS, Windows) ".GIT/config" reaches the same file as ".git/config".
+// A .git directory holds repository metadata, credentials included
+// (actions/checkout persists its token in .git/config by default), never
+// render input.
+func RelEntersGit(rel string) bool {
+	for component := range strings.SplitSeq(rel, string(filepath.Separator)) {
+		if strings.EqualFold(component, ".git") {
+			return true
+		}
+	}
+	return false
+}
+
 func CleanRelative(raw string) (string, bool) {
 	clean := filepath.Clean(raw)
 	if filepath.IsAbs(clean) || clean == "." || RelEscapes(clean) {

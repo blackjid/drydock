@@ -135,7 +135,7 @@ func (w *kustomizeWorkspace) prepareKustomizeGeneratorEntry(dir, boundaryRoot st
 	if inline {
 		describe = describeInlineGeneratorEntry(docs)
 	} else {
-		path, info, err := validateWorkspaceLocalRef(boundaryRoot, dir, "generators", entry)
+		path, info, err := validateLocalKustomizeRef(boundaryRoot, dir, "generators", entry)
 		if err != nil {
 			return false, nil, err
 		}
@@ -241,7 +241,7 @@ func (w *kustomizeWorkspace) emulateKSOPSGeneratorFile(dir, boundaryRoot, manife
 	// KSOPS resolves files: entries relative to the generator manifest's
 	// directory (README: paths are "relative to manifest files"; ksops.go
 	// reads them from the exec function's working directory).
-	path, info, err := validateWorkspaceLocalRef(boundaryRoot, manifestDir, "generators.files", fileRef)
+	path, info, err := validateLocalKustomizeRef(boundaryRoot, manifestDir, "generators.files", fileRef)
 	if err != nil {
 		return "", err
 	}
@@ -461,7 +461,10 @@ func ksopsGeneratorFileRefs(path string) []string {
 // KSOPS documents among docs. For inline generators: entries these referents
 // resolve relative to the kustomization directory — the same base directory
 // prepareKustomizeGeneratorEntry uses during emulation (manifestDir stays the
-// kustomization dir for inline entries).
+// kustomization dir for inline entries). Drydock's emulation, not kustomize,
+// reads them, and it reads each one trimmed (ksopsGeneratorFilesFromDocument),
+// so they are returned trimmed: validation, the digest and the workspace copy
+// must name the file the emulation reads.
 func ksopsGeneratorFileRefsFromDocuments(docs []*goyaml.Node) []string {
 	var refs []string
 	for _, doc := range docs {
@@ -472,7 +475,11 @@ func ksopsGeneratorFileRefsFromDocuments(docs []*goyaml.Node) []string {
 		if class, _, _ := classifyGeneratorDocument(root); class != generatorDocumentKSOPS {
 			continue
 		}
-		refs = append(refs, yamlMappingStringSequence(root, "files")...)
+		for _, ref := range yamlMappingStringSequence(root, "files") {
+			if ref = strings.TrimSpace(ref); ref != "" {
+				refs = append(refs, ref)
+			}
+		}
 	}
 	return refs
 }
@@ -483,7 +490,8 @@ func ksopsGeneratorFileRefsFromDocuments(docs []*goyaml.Node) []string {
 // every copied path (legal under repo-root containment) would otherwise be
 // absent from the temp tree when ksops-compat emulation reads it.
 func ksopsGeneratorFilePaths(dir, ref string) []string {
-	ref = strings.TrimSpace(ref)
+	// The manifest entry is read exactly as written; its files: referents
+	// come back trimmed, as the emulation reads them.
 	if ref == "" || isRemoteKustomizeRef(ref) || filepath.IsAbs(ref) {
 		return nil
 	}
@@ -492,8 +500,7 @@ func ksopsGeneratorFilePaths(dir, ref string) []string {
 	fileRefs := ksopsGeneratorFileRefs(manifestPath)
 	out := make([]string, 0, len(fileRefs))
 	for _, fileRef := range fileRefs {
-		fileRef = strings.TrimSpace(fileRef)
-		if fileRef == "" || isRemoteKustomizeRef(fileRef) || filepath.IsAbs(fileRef) {
+		if isRemoteKustomizeRef(fileRef) || filepath.IsAbs(fileRef) {
 			continue
 		}
 		out = append(out, filepath.Clean(filepath.Join(manifestDir, filepath.FromSlash(fileRef))))

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/sholdee/drydock/internal/filecopy"
+	"github.com/sholdee/drydock/internal/pathsafety"
 	"sigs.k8s.io/kustomize/api/types"
 )
 
@@ -68,6 +69,11 @@ func copyPreparedKustomizeWorkspaceTree(ctx context.Context, repoRoot, sourceRoo
 				return err
 			}
 		}
+		for _, path := range node.PluginInputPaths {
+			if err := copier.copyPath(path); err != nil {
+				return err
+			}
+		}
 	}
 	for _, path := range sourceOptionPaths {
 		if err := copier.copyPath(path); err != nil {
@@ -82,6 +88,11 @@ func (c *preparedKustomizeWorkspaceCopier) copyPath(path string) error {
 	rel, err := filepath.Rel(c.repoRoot, path)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("copy source path %q escapes source root %q", path, c.repoRoot)
+	}
+	// Render input never lives in a .git directory; copying one would put
+	// repository metadata (credentials included) where kustomize can read it.
+	if pathsafety.RelEntersGit(rel) {
+		return fmt.Errorf("copy source path %q enters a .git directory", path)
 	}
 	if c.pathCovered(path) {
 		return nil
@@ -165,8 +176,9 @@ func (c *preparedKustomizeWorkspaceCopier) pathCovered(path string) bool {
 //nolint:gocyclo // Kustomize local-reference collection mirrors the schema fields that can point at files.
 func referencedKustomizeWorkspacePaths(dir string, kustomization types.Kustomization) []string {
 	refs := make([]string, 0)
+	// Refs are copied exactly as written, the name kustomize (or Helm, for
+	// value files) reads: "cm.yaml " is not "cm.yaml".
 	appendLocalRef := func(ref string) {
-		ref = strings.TrimSpace(ref)
 		if ref == "" || isRemoteKustomizeRef(ref) || filepath.IsAbs(ref) {
 			return
 		}
@@ -183,10 +195,6 @@ func referencedKustomizeWorkspacePaths(dir string, kustomization types.Kustomiza
 		}
 	}
 	for _, ref := range kustomization.Resources {
-		appendLocalRef(ref)
-	}
-
-	for _, ref := range kustomization.Bases { //nolint:staticcheck // Kustomize still accepts bases; copy local refs for parity.
 		appendLocalRef(ref)
 	}
 	for _, ref := range kustomization.Components {
@@ -256,7 +264,6 @@ func sourceKustomizeWorkspaceAdditions(ctx context.Context, repoRoot, sourceRoot
 	refs := make([]string, 0, len(opts.Kustomize.Components)+len(opts.Kustomize.Patches))
 	graph := make([]kustomizeGraphNode, 0)
 	appendLocalRef := func(ref string) {
-		ref = strings.TrimSpace(ref)
 		if ref == "" || isRemoteKustomizeRef(ref) || filepath.IsAbs(ref) {
 			return
 		}
@@ -277,7 +284,7 @@ func sourceKustomizeWorkspaceAdditions(ctx context.Context, repoRoot, sourceRoot
 			}
 			return nil, nil, err
 		}
-		_, componentGraph, err := collectKustomizeGraphForPreparation(ctx, repoRoot, componentPath)
+		_, componentGraph, err := collectKustomizeGraph(ctx, repoRoot, componentPath, kustomizeInputWalk)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -296,7 +303,6 @@ func appendGeneratorWorkspaceRefs(appendLocalRef func(string), sources types.KvP
 	for _, source := range sources.EnvSources {
 		appendLocalRef(source)
 	}
-	appendLocalRef(sources.EnvSource)
 }
 
 type copyTreeOptions struct {
@@ -326,7 +332,7 @@ func copyTree(srcRoot, dstRoot string, options copyTreeOptions) error {
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return fmt.Errorf("copy source path %q escapes source root %q", path, srcRoot)
 		}
-		if entry.Name() == ".git" {
+		if strings.EqualFold(entry.Name(), ".git") {
 			if entry.IsDir() {
 				return filepath.SkipDir
 			}

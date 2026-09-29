@@ -8,7 +8,6 @@ import (
 
 	"github.com/sholdee/drydock/internal/diagnostic"
 	goyaml "go.yaml.in/yaml/v3"
-	"sigs.k8s.io/kustomize/api/types"
 )
 
 type kustomizeWorkspace struct {
@@ -108,9 +107,9 @@ func (w *kustomizeWorkspace) prepareKustomizationDir(ctx context.Context, dir, b
 	if err != nil {
 		return err
 	}
-	var kustomization types.Kustomization
-	if err := goyaml.Unmarshal(content, &kustomization); err != nil {
-		return fmt.Errorf("decode kustomization %s: %w", manifestPath, err)
+	kustomization, err := decodeKustomization(manifestPath, content)
+	if err != nil {
+		return err
 	}
 	if dir == w.sourceRoot {
 		if err := applySourceKustomizeOptions(&kustomization, dir, boundaryRoot, w.opts); err != nil {
@@ -148,13 +147,6 @@ func (w *kustomizeWorkspace) prepareKustomizationDir(ctx context.Context, dir, b
 	}
 	kustomization.Resources = resources
 
-	bases, err := w.prepareKustomizeRefs(ctx, dir, boundaryRoot, "bases", graphIndex, kustomization.Bases, childInheritedHelmNamespace, false) //nolint:staticcheck // Kustomize still accepts bases; rewrite it for parity.
-	if err != nil {
-		return fmt.Errorf("%s: %w", manifestPath, err)
-	}
-
-	kustomization.Bases = bases //nolint:staticcheck // Kustomize still accepts bases; rewrite it for parity.
-
 	components, err := w.prepareKustomizeRefs(ctx, dir, boundaryRoot, "components", graphIndex, kustomization.Components, childInheritedHelmNamespace, false)
 	if err != nil {
 		return fmt.Errorf("%s: %w", manifestPath, err)
@@ -181,6 +173,9 @@ func (w *kustomizeWorkspace) prepareKustomizationDir(ctx context.Context, dir, b
 		return fmt.Errorf("%s: %w", manifestPath, err)
 	}
 
+	// The rewrite encodes the kustomize-decoded kustomization, so its keys
+	// are the canonical ones and its deprecated fields are already folded:
+	// kustomize reads from it what it would read from the original.
 	data, err := goyaml.Marshal(&kustomization)
 	if err != nil {
 		return fmt.Errorf("encode temp kustomization %s: %w", manifestPath, err)
@@ -219,7 +214,7 @@ func (w *kustomizeWorkspace) prepareKustomizeRefs(ctx context.Context, dir, boun
 			continue
 		}
 
-		localPath, info, err := validateWorkspaceLocalRef(boundaryRoot, dir, field, ref)
+		localPath, info, err := validateLocalKustomizeRef(boundaryRoot, dir, field, ref)
 		if err != nil {
 			return nil, err
 		}

@@ -9,11 +9,14 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/sholdee/drydock/internal/cacheevent"
 	"github.com/sholdee/drydock/internal/chart"
 	"github.com/sholdee/drydock/internal/pathsafety"
 	"github.com/sholdee/drydock/internal/remote"
+	"sigs.k8s.io/kustomize/api/provider"
+	"sigs.k8s.io/kustomize/api/resource"
 )
 
 //nolint:gocyclo // Remote acquisition branches on file/dir mode, Git copies, and recursive graph preparation.
@@ -80,8 +83,14 @@ func (w *kustomizeWorkspace) acquireAndCopyKustomizeRef(ctx context.Context, dir
 		recurseDir := generatedRoot
 		rewritten := generatedRel
 		if ref.Kind == kustomizeRemoteGit {
+			// The acquired repository is the boundary of everything its
+			// kustomizations read, builtin plugin config referents and
+			// directory entries included: a render walk bounded by it, not
+			// by the workspace the copy lands in, where ../ reaches the
+			// local repository. The walk also lists the referents the copy
+			// must carry.
 			repoRoot := filepath.Clean(acquired.Path)
-			_, graph, err := collectKustomizeGraphForPreparation(ctx, repoRoot, acquiredPath)
+			_, graph, err := collectKustomizeGraph(ctx, repoRoot, acquiredPath, kustomizeRenderWalk)
 			if err != nil {
 				return "", "", "", fmt.Errorf("collect remote kustomize graph %s: %w", redactKustomizeRef(ref.Original), err)
 			}
@@ -311,9 +320,23 @@ func redactKustomizeRef(ref string) string {
 	return redactKustomizeRemoteRef(ref)
 }
 
+// isInlineStrategicMergePatch reports whether kustomize reads a
+// patchesStrategicMerge entry (or a PatchStrategicMergeTransformer paths:
+// entry) as patch content rather than a path: for legacy reasons the plugin
+// tries every entry as content with its resource factory first and treats
+// it as a file only when that fails (builtins PatchStrategicMergeTransformer,
+// loadFromPaths). So "{}", a blank entry and a comment are content, and a
+// multi-line entry that is not a resource is a path.
 func isInlineStrategicMergePatch(patch string) bool {
-	return strings.Contains(patch, "\n")
+	_, err := kustomizeResourceFactory().SliceFromBytes([]byte(patch))
+	return err == nil
 }
+
+// kustomizeResourceFactory is the resource factory krusty's default
+// dependency provider builds; it holds no per-call state.
+var kustomizeResourceFactory = sync.OnceValue(func() *resource.Factory {
+	return provider.NewDefaultDepProvider().GetResourceFactory()
+})
 
 func isRemoteKustomizeRef(ref string) bool {
 	trimmed := strings.TrimSpace(ref)

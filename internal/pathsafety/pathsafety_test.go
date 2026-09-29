@@ -22,6 +22,19 @@ func TestRelEscapes(t *testing.T) {
 	}
 }
 
+func TestRelEntersGit(t *testing.T) {
+	for _, rel := range []string{".git", filepath.Join(".git", "config"), filepath.Join("a", ".GIT", "config"), filepath.Join("sub", ".Git"), filepath.Join("..", ".git")} {
+		if !RelEntersGit(rel) {
+			t.Fatalf("RelEntersGit(%q) = false, want true", rel)
+		}
+	}
+	for _, rel := range []string{".", "", "a", ".gitignore", ".github", filepath.Join("a", "x.git"), filepath.Join("a", "git")} {
+		if RelEntersGit(rel) {
+			t.Fatalf("RelEntersGit(%q) = true, want false", rel)
+		}
+	}
+}
+
 func TestCleanRelative(t *testing.T) {
 	got, ok := CleanRelative("nested/../app")
 	if !ok || got != "app" {
