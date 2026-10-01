@@ -169,6 +169,165 @@ ignore rules.
 - `PATH` and every other sidecar container variable: the sidecar prepends its
   own `os.Environ()`, which drydock's fixed exec environment never has.
 
+## Container plugin fixture
+
+`applications/plugin-container.yaml` (`parity-plugin-container`) renders
+through drydock's `engine: container` on one side and a CMP sidecar running
+the same image on the other.
+
+- Image: the Docker-official `alpine:3.23.6`, pinned by its multi-arch index
+  digest `sha256:85fe1e81d6758c208f3e1eed4338a1997e19d4be002d4dd32d3100c9a8c010a0`,
+  which is identical on `public.ecr.aws/docker/library`, `mirror.gcr.io/library`
+  and `docker.io/library`. The smoke pulls it through the same mirror loop as
+  the registry image, re-tags it `drydock-argocd-parity-alpine:<cluster>` and
+  kind-loads it.
+- Argo CD side: `sidecar/plugin-container.yaml` is the `parity-container`
+  descriptor, mounted from the `parity-container-cmp` ConfigMap into the
+  `parity-container` sidecar of `sidecar/repo-server-patch.yaml`. The sidecar
+  runs the staged `argocd-cmp-server` (static, so it runs on alpine) with its
+  own private `/tmp`.
+- drydock side: the `parity-container` entry in `repo/.drydock/plugins.yaml`
+  names the image by digest with the default `network: none`, so the capture
+  runs `docker run --network none --pull never --entrypoint awk <image> -f
+  generate.awk` against a copy of the source mounted at `/work`. Like
+  `parity-plugin-env` it is captured with `--enable-plugins` and the trusted
+  policy ref. drydock reads policy only from the git snapshot the harness
+  builds, so when a fallback mirror served the pull the harness rewrites the
+  image line in that snapshot (never in this directory) to the pulled
+  reference, and fails if the expected line is missing either way.
+
+Both sides run `workloads/plugin-container/generate.awk` with busybox awk and
+must render this `data`:
+
+| key | value | proves |
+| --- | --- | --- |
+| `alpineRelease` | `3.23.6` | the program ran in the pinned image |
+| `greeting` | `hello from the parity container workload` | the working directory is the Application source |
+| `appName` | `parity-plugin-container` | build environment reached the container |
+| `appNamespace` | `parity-plugin-container` | build environment reached the container |
+| `envMode` | `container` | `ARGOCD_ENV_MODE` crossed the container boundary |
+| `paramTitle` | `from-container` | `PARAM_TITLE` crossed the container boundary |
+
+The program exits non-zero when either file is unreadable instead of emitting
+an empty value, so both sides failing alike cannot compare equal. The full
+environment contract (`ARGOCD_APP_PARAMETERS`, array parameters, the
+`ARGOCD_ENV_` prefix rule) stays pinned by `parity-plugin-env`; this fixture
+pins only that the container engine delivers the same inputs. It is not in
+the tracking comparison.
+
+### Deliberately not covered by this fixture
+
+- `network: default`, cache mounts, `init` commands and post-renderers: each
+  is a drydock-side option with no Argo CD counterpart to compare against.
+- Mutable image tags (`allowMutableImageTag`) and image pulls at render time:
+  the capture is offline, which requires a locally present digest reference.
+- Container stderr: drydock omits it from errors by design, so the harness
+  cannot compare it.
+
+### Local runs
+
+drydock's container engine looks up `docker` only on
+`/usr/local/bin:/usr/bin:/bin`, and offline it ignores the shell's Docker
+context: it rejects a non-empty `DOCKER_CONTEXT`, `DOCKER_CONFIG`,
+`DOCKER_TLS_VERIFY` or `DOCKER_CERT_PATH` and runs with an empty client
+config, so the daemon it reaches is `DOCKER_HOST` or `/var/run/docker.sock`,
+and `DOCKER_HOST` must be a local `unix://` socket. Before the capture the
+harness checks both with the same lookups. On Docker Desktop
+`/var/run/docker.sock` exists; on colima or OrbStack without it, set
+`DOCKER_HOST` to the `unix://` endpoint `docker context inspect` reports. Run with
+`KUBECONFIG` pointing at a fresh file (for example `KUBECONFIG=$(mktemp)`) so
+the throwaway kind cluster never touches your kubeconfig. Apple Silicon hosts
+run the `linux/arm64` image variants.
+
+## argocd-vault-plugin fixture
+
+`applications/avp.yaml` (`parity-avp`) names the plugin
+`argocd-vault-plugin`, the exact name drydock's built-in AVP compatibility
+matches. drydock needs no `--enable-plugins` and no policy for it: it renders
+`workloads/avp` as a plain directory and replaces every placeholder with
+`drydock-redacted-` plus the first 12 hex digits of the sha256 of the
+placeholder's identity, `path:<path>#<key>`. Live Argo CD runs the real
+plugin, so the fixture makes the real plugin produce those same strings.
+
+- Argo CD side: an `argocd-vault-plugin` sidecar (descriptor
+  `sidecar/plugin-avp.yaml`, mounted from the `parity-avp-cmp` ConfigMap)
+  runs `argocd-vault-plugin generate ./` with `AVP_TYPE=kubernetessecret`.
+  Its image is the pinned alpine plus the AVP v1.18.1 release binary,
+  downloaded for the host architecture, checked against a pinned sha256,
+  copied in with `docker cp` and committed - no Dockerfile build and no
+  package fetch - then checked with `argocd-vault-plugin version` and
+  kind-loaded.
+- The backend is the `parity-avp-backend` Secret in `argocd`
+  (`sidecar/avp-backend.yaml`). Its values are drydock's markers for the
+  three keys, so AVP substituting them renders exactly what drydock renders.
+  No secret value exists anywhere in the run.
+- AVP logs in with `rest.InClusterConfig` before reading any manifest, and
+  the repo-server pod sets `automountServiceAccountToken: false`, so the AVP
+  container alone mounts a projected token, `ca.crt` and namespace at the
+  standard path. `sidecar/avp-rbac.yaml` grants the `argocd-repo-server`
+  ServiceAccount `get` on that one Secret, and the harness confirms the grant
+  with `kubectl auth can-i` before patching the repo-server.
+
+`workloads/avp/configmaps.yaml` covers inline placeholders, two inline
+placeholders embedded in one string, annotation-scoped `<key>` placeholders
+(including one embedded in a string), an inline placeholder under the path
+annotation, and a plain field. Both sides must render this `data`:
+
+| ConfigMap | key | value |
+| --- | --- | --- |
+| `parity-avp-inline` | `username` | `drydock-redacted-5401fc97182f` |
+| `parity-avp-inline` | `dsn` | `postgres://drydock-redacted-5401fc97182f:drydock-redacted-4de5813a6837@db.example.invalid:5432/app` |
+| `parity-avp-inline` | `plain` | `left exactly as written` |
+| `parity-avp-annotated` | `password` | `drydock-redacted-4de5813a6837` |
+| `parity-avp-annotated` | `endpoint` | `drydock-redacted-6799b3ec831f` |
+| `parity-avp-annotated` | `url` | `https://drydock-redacted-6799b3ec831f/v1` |
+| `parity-avp-annotated` | `inline` | `drydock-redacted-5401fc97182f` |
+
+Beyond the exact comparison, the harness counts `drydock-redacted-` markers
+on each side and requires exactly `AVP_EXPECTED_MARKERS` (7) on both, so
+"neither side replaced anything" cannot pass. The app is not in the tracking
+comparison.
+
+### Placeholder rules
+
+The two implementations agree only inside these rules; every value in the
+workload obeys them, and new values must too.
+
+- Spell the path exactly `parity-avp-backend` in every inline placeholder and
+  in the `avp.kubernetes.io/path` annotation, with no `argocd:` namespace
+  prefix: AVP reads a bare name from the `argocd` namespace, and drydock
+  hashes the path text as written.
+- No whitespace inside `<>`, no `|` modifiers and no `#version` suffix.
+- An annotated resource has a non-empty annotation and no `<` or `>`
+  anywhere except its placeholders: once the annotation is present AVP treats
+  any `<...>` as a placeholder, while drydock only accepts keys made of
+  `[A-Za-z0-9_./-]`.
+- Quote every scalar.
+- No list nested in a list: AVP does not descend into one, drydock does.
+- Keep the directory flat (AVP's `generate ./` walks it recursively, the
+  drydock directory source does not) and use ConfigMaps only:
+  `argocd app manifests` masks Secret data as `++++++++`.
+
+### Deliberately not covered by this fixture
+
+- Placeholders in base64 `Secret.data` (AVP decodes and replaces them,
+  drydock does not), modifiers, versioned placeholders, lists nested in lists
+  and Secrets in general: each is a known divergence or cannot be compared
+  through `argocd app manifests`.
+- Other AVP backends and authentication methods, and AVP configuration from
+  `--secret-name` or `--config-path`.
+- A versioned plugin name (`spec.version`), or a renamed plugin that drydock
+  recognizes as AVP from a discovered ConfigManagementPlugin definition
+  rather than by the exact name.
+
+### Local runs
+
+The harness downloads the AVP binary for the Docker daemon's architecture
+(`linux_arm64` on Apple Silicon) from GitHub releases, so the run needs that
+download. The
+image builds from the pinned alpine already in the local image store, so it
+needs no Docker Hub or package-mirror access.
+
 ## OCI artifact fixture
 
 `oci-artifact/` is the content directory for the one first-class OCI
