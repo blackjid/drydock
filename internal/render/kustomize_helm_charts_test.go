@@ -1133,3 +1133,53 @@ helmCharts:
 		t.Fatalf("expr = %#v, want leading-newline multiline scalar", got)
 	}
 }
+
+func TestKustomizeRendererAcceptsValuesInlineMultilineScalars(t *testing.T) {
+	root := t.TempDir()
+	chartDir := filepath.Join(root, "charts", "demo")
+	writeTestChart(t, chartDir, `
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}
+data:
+  expr: {{ (index (index (index .Values.groups 0).rules 0).expr) | quote }}
+`)
+	writeFile(t, filepath.Join(root, "apps", "demo", "kustomization.yaml"), `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+helmCharts:
+  - name: demo
+    repo: https://charts.example.test
+    version: 1.2.3
+    releaseName: demo
+    valuesInline:
+      groups:
+        - rules:
+            - expr: |
+
+                foo != 1
+`)
+
+	result, diags, err := (KustomizeRenderer{}).Render(context.Background(), ResolvedSource{
+		RepoRoot: root,
+		Path:     filepath.Join("apps", "demo"),
+	}, RenderOptions{ChartAcquirer: &fakeChartAcquirer{chartDir: chartDir}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if len(diags) != 0 {
+		t.Fatalf("diagnostics = %#v", diags)
+	}
+	configMap := findManifest(result, "ConfigMap", "demo")
+	if configMap == nil {
+		t.Fatalf("missing ConfigMap demo in %#v", result)
+	}
+	got, found, err := unstructured.NestedString(configMap.Object, "data", "expr")
+	if err != nil || !found {
+		t.Fatalf("expr lookup found=%v err=%v", found, err)
+	}
+	if got != "\nfoo != 1\n" {
+		t.Fatalf("expr = %#v, want leading-newline multiline scalar", got)
+	}
+}

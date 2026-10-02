@@ -422,7 +422,8 @@ func writeKustomizeHelmGeneratedValuesFile(ctx context.Context, tempRepoRoot, te
 	}
 
 	generatedRel := filepath.ToSlash(filepath.Join(".drydock", "values", generatedName+".yaml"))
-	data, err := goyaml.Marshal(values)
+	// yaml.v3 can emit a mismatched |N on nested multiline scalars.
+	data, err := sigsyaml.Marshal(values)
 	if err != nil {
 		return "", fmt.Errorf("encode generated helm values %s: %w", generatedRel, err)
 	}
