@@ -18,6 +18,7 @@ import (
 	"sigs.k8s.io/kustomize/api/krusty"
 	"sigs.k8s.io/kustomize/api/types"
 	"sigs.k8s.io/kustomize/kyaml/filesys"
+	sigsyaml "sigs.k8s.io/yaml"
 )
 
 type KustomizeRenderer struct{}
@@ -421,7 +422,8 @@ func writeKustomizeHelmGeneratedValuesFile(ctx context.Context, tempRepoRoot, te
 	}
 
 	generatedRel := filepath.ToSlash(filepath.Join(".drydock", "values", generatedName+".yaml"))
-	data, err := goyaml.Marshal(values)
+	// yaml.v3 can emit a mismatched |N on nested multiline scalars.
+	data, err := sigsyaml.Marshal(values)
 	if err != nil {
 		return "", fmt.Errorf("encode generated helm values %s: %w", generatedRel, err)
 	}
@@ -488,7 +490,8 @@ func writeGeneratedHelmManifests(root, rel string, manifests []Manifest) error {
 		}
 		annotations[konfig.HelmGeneratedAnnotation] = "true"
 		obj.SetAnnotations(annotations)
-		data, err := goyaml.Marshal(obj.Object)
+		// yaml.v3 can emit a mismatched |N on nested multiline scalars.
+		data, err := sigsyaml.Marshal(obj.Object)
 		if err != nil {
 			return fmt.Errorf("encode generated helm manifest: %w", err)
 		}
