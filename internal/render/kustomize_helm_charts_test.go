@@ -1070,3 +1070,66 @@ helmChartInflationGenerator:
     chartVersion: 1.2.3
 `, "helmChartInflationGenerator")
 }
+
+func TestKustomizeRendererAcceptsHelmChartMultilineScalars(t *testing.T) {
+	root := t.TempDir()
+	chartDir := filepath.Join(root, "charts", "demo")
+	writeTestChart(t, chartDir, `
+apiVersion: example.io/v1
+kind: Probe
+metadata:
+  name: {{ .Release.Name }}
+spec:
+  groups:
+    - name: demo
+      rules:
+        - alert: Demo
+          expr: |
+            {{ .Values.expr | nindent 12 }}
+`)
+	writeFile(t, filepath.Join(root, "apps", "demo", "kustomization.yaml"), `
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+helmCharts:
+  - name: demo
+    repo: https://charts.example.test
+    version: 1.2.3
+    releaseName: demo
+    valuesInline:
+      expr: foo != 1
+`)
+
+	result, diags, err := (KustomizeRenderer{}).Render(context.Background(), ResolvedSource{
+		RepoRoot: root,
+		Path:     filepath.Join("apps", "demo"),
+	}, RenderOptions{ChartAcquirer: &fakeChartAcquirer{chartDir: chartDir}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	if len(diags) != 0 {
+		t.Fatalf("diagnostics = %#v", diags)
+	}
+	probe := findManifest(result, "Probe", "demo")
+	if probe == nil {
+		t.Fatalf("missing Probe demo in %#v", result)
+	}
+	groups, found, err := unstructured.NestedSlice(probe.Object, "spec", "groups")
+	if err != nil || !found || len(groups) != 1 {
+		t.Fatalf("groups lookup found=%v len=%d err=%v", found, len(groups), err)
+	}
+	group, ok := groups[0].(map[string]any)
+	if !ok {
+		t.Fatalf("group = %#v, want map", groups[0])
+	}
+	rules, ok := group["rules"].([]any)
+	if !ok || len(rules) != 1 {
+		t.Fatalf("rules = %#v, want one rule", group["rules"])
+	}
+	rule, ok := rules[0].(map[string]any)
+	if !ok {
+		t.Fatalf("rule = %#v, want map", rules[0])
+	}
+	if got := rule["expr"]; got != "\nfoo != 1\n" {
+		t.Fatalf("expr = %#v, want leading-newline multiline scalar", got)
+	}
+}
