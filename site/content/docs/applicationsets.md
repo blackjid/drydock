@@ -36,6 +36,29 @@ Supported ApplicationSet behavior includes:
 - multiple supported top-level generators evaluated independently and
   concatenated in manifest order
 
+## External ApplicationSet Files
+
+An ApplicationSet can live in one repository while the manifests it renders
+live in another. Pass that file with repeatable `--discover-manifest <path>` on
+`get`, `test`, and `diff` commands. The path can be absolute and outside the
+repository and outside any `--ref` snapshot. drydock loads the file once and
+adds its `Application` and `ApplicationSet` documents to discovery on both diff
+sides, so a pull request diff of the manifest repository renders the generated
+Applications from each side's commit tree.
+
+- Sources whose `repoURL` names the repository under diff resolve to each
+  side's tree through the usual self-repository rules (`HEAD`, a diffed ref
+  name, or the default-branch name).
+- `--ref` snapshots never read the dirty checkout; without the flag, an
+  uncommitted ApplicationSet in the working tree stays invisible.
+- Changed-only selection ignores the external file itself. A generated
+  Application owns its source paths in the repository under diff.
+- A missing file, `..` path components, a symlink, or a document that is not
+  an `Application` or `ApplicationSet` is an error.
+
+In the GitHub pr-action, pass one argument per line through
+`extra-diff-args`, for example `--discover-manifest=/home/runner/work/platform/appset.yaml`.
+
 ## Git Generators
 
 Git directory and file matches are sorted by normalized relative path. Include
