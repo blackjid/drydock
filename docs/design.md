@@ -142,10 +142,12 @@ file is loaded once and merged into discovery on every side, so a ref diff sees
 the same objects on both sides while ref snapshots stay pure commit trees and
 the dirty checkout is never read. A missing path, a path with `..` components,
 a symlink, a non-regular file, or any document that is not an Argo CD
-`Application` or `ApplicationSet` is an error. The file owns no repository path
-for changed-only selection and the render cache digests nothing for it; a
-generated Application owns its source paths in the repository under diff as
-usual, and sources naming that repository still render from each side's tree
+`Application` or `ApplicationSet` is an error. The file itself is not a
+digested input path, so it owns no repository path for changed-only selection;
+the render cache still keys each Application on its name, namespace, and full
+spec, so a file change that alters a generated Application's spec re-renders
+it. A generated Application owns its source paths in the repository under diff
+as usual, and sources naming that repository still render from each side's tree
 through self-repository resolution and the per-side `--repo-map` rewrite.
 
 ApplicationSet support is deterministic and local. Git, list, matrix, merge,

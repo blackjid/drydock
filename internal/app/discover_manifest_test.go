@@ -131,6 +131,65 @@ func TestDiffRefOrigWithPathOrigStillRejectedWithDiscoverManifest(t *testing.T) 
 	}
 }
 
+// The external file's absolute path is not a repository path, so it must not
+// mark the repository root as already discovered for an app-of-apps source.
+func TestListApplicationsDiscoverManifestAppOfAppsRendersChildren(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		source string
+	}{
+		{name: "repository root", source: "path: .\n    directory:\n      recurse: true"},
+		{name: "subdirectory", source: "path: apps"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "apps", "child.yaml"), `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: child
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/example/repo
+    targetRevision: main
+    path: workloads/child
+  destination:
+    name: in-cluster
+    namespace: child
+`)
+			external := filepath.Join(t.TempDir(), "parent.yaml")
+			writeTestFile(t, external, `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: parent
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/example/repo
+    targetRevision: main
+    `+tt.source+`
+  destination:
+    name: in-cluster
+    namespace: argocd
+`)
+
+			result, err := Orchestrator{}.ListApplications(context.Background(), BuildRequest{
+				Path:                  root,
+				DiscoverIgnoreGlobs:   []string{"apps/**"},
+				DiscoverManifestPaths: []string{external},
+			})
+			if err != nil {
+				t.Fatalf("ListApplications() error = %v", err)
+			}
+			if names := applicationNames(result.Applications); strings.Join(names, ",") != "child,parent" {
+				t.Fatalf("Applications = %#v, want child and parent", names)
+			}
+		})
+	}
+}
+
 func TestLoadDiscoverManifestsRejectsUnsafeOrInvalidInput(t *testing.T) {
 	dir := t.TempDir()
 	valid := filepath.Join(dir, "appset.yaml")
@@ -141,6 +200,8 @@ func TestLoadDiscoverManifestsRejectsUnsafeOrInvalidInput(t *testing.T) {
 	}
 	configMap := filepath.Join(dir, "configmap.yaml")
 	writeTestFile(t, configMap, "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: x\n")
+	empty := filepath.Join(dir, "empty.yaml")
+	writeTestFile(t, empty, "")
 	mixed := filepath.Join(dir, "mixed.yaml")
 	writeTestFile(t, mixed, "apiVersion: argoproj.io/v1alpha1\nkind: Application\nmetadata:\n  name: a\n---\napiVersion: argoproj.io/v1alpha1\nkind: AppProject\nmetadata:\n  name: p\n")
 
@@ -154,6 +215,7 @@ func TestLoadDiscoverManifestsRejectsUnsafeOrInvalidInput(t *testing.T) {
 		{name: "symlink", path: link, want: "is a symlink"},
 		{name: "directory", path: dir, want: "must be a regular file"},
 		{name: "wrong kind", path: configMap, want: "only argoproj.io/v1alpha1 Application and ApplicationSet"},
+		{name: "empty", path: empty, want: "contains no Application or ApplicationSet"},
 		{name: "mixed kinds", path: mixed, want: "AppProject"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

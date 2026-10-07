@@ -92,9 +92,12 @@ drydock diff apps --repo . --ref-orig origin/main --ref HEAD \
   --discover-manifest=/tmp/platform/appsets/manifests.yaml
 ```
 
-The file must hold only Argo CD `Application` or `ApplicationSet` documents,
-must not contain `..` path components, and must not be a symlink. It is not
-read from either ref snapshot and is never a changed path of the diff.
+Every command with path discovery accepts the flag: `build`, `get`, `test`,
+`diff`, and `diag`. A relative path resolves against the current working
+directory, unlike `--discover-kustomize`, which is relative to `--path`. The
+file must hold only Argo CD `Application` or `ApplicationSet` documents, must
+not contain `..` path components, and must not be a symlink. It is not read from
+either ref snapshot and is never a changed path of the diff.
 
 For repositories that also commit non-deployable YAML, such as unrendered
 chart templates that fail strict decoding, exclude those files from discovery

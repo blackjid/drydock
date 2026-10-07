@@ -40,11 +40,11 @@ Supported ApplicationSet behavior includes:
 
 An ApplicationSet can live in one repository while the manifests it renders
 live in another. Pass that file with repeatable `--discover-manifest <path>` on
-`get`, `test`, and `diff` commands. The path can be absolute and outside the
-repository and outside any `--ref` snapshot. drydock loads the file once and
-adds its `Application` and `ApplicationSet` documents to discovery on both diff
-sides, so a pull request diff of the manifest repository renders the generated
-Applications from each side's commit tree.
+the discovery commands (`build`, `get`, `test`, `diff`, `diag`). The path can be
+absolute and outside the repository and outside any `--ref` snapshot. drydock
+loads the file once and adds its `Application` and `ApplicationSet` documents
+to discovery on both diff sides, so a pull request diff of the manifest
+repository renders the generated Applications from each side's commit tree.
 
 - Sources whose `repoURL` names the repository under diff resolve to each
   side's tree through the usual self-repository rules (`HEAD`, a diffed ref
@@ -53,11 +53,16 @@ Applications from each side's commit tree.
   uncommitted ApplicationSet in the working tree stays invisible.
 - Changed-only selection ignores the external file itself. A generated
   Application owns its source paths in the repository under diff.
+- Git generators always scan the repository under analysis, whatever the
+  ApplicationSet's generator `repoURL` and `revision` say. An external
+  ApplicationSet whose Git generator points at its own repository produces no
+  Applications, or the wrong ones.
 - A missing file, `..` path components, a symlink, or a document that is not
   an `Application` or `ApplicationSet` is an error.
 
-In the GitHub pr-action, pass one argument per line through
-`extra-diff-args`, for example `--discover-manifest=/home/runner/work/platform/appset.yaml`.
+In the GitHub pr-action, list the files one per line in the
+`discover-manifest` input, for example `/home/runner/work/platform/appset.yaml`.
+The test, diff, and image diff steps all receive them.
 
 ## Git Generators
 
