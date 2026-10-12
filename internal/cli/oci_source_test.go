@@ -2,6 +2,7 @@ package cli
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -29,6 +30,28 @@ spec:
     targetRevision: "`+revision+`"
     path: `+sourcePath+`
   destination:
+    name: in-cluster
+    namespace: default
+`)
+}
+
+// writeOCIChartAppForCLI writes an Application in the issue #399 shape: an
+// oci:// repoURL plus a chart: (ignored by Argo CD and drydock), no path, and
+// extra carries the helm block when one is wanted. writeOCIAppForCLI
+// hard-codes a path line, which this shape must not have.
+func writeOCIChartAppForCLI(t *testing.T, root, appName, repoURL, chart, revision, extra string) {
+	t.Helper()
+	writeCLITestFile(t, filepath.Join(root, "apps", appName+".yaml"), `apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: `+appName+`
+  namespace: argocd
+spec:
+  source:
+    repoURL: `+repoURL+`
+    targetRevision: "`+revision+`"
+    chart: `+chart+`
+`+extra+`  destination:
     name: in-cluster
     namespace: default
 `)
@@ -99,6 +122,87 @@ func TestCLIOCIBasicAuthSuccess(t *testing.T) {
 		"--oci-password", "sekrit-pass",
 	)
 	assertStdoutContainsAll(t, result, "authed-artifact-content")
+}
+
+// writeCLIRegistryConfig writes a Docker-format registry config file with one
+// plain auths entry for host and returns its path.
+func writeCLIRegistryConfig(t *testing.T, root, host, username, password string) string {
+	t.Helper()
+	path := filepath.Join(root, "registry-config.json")
+	auth := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+	writeCLITestFile(t, path, `{"auths":{"`+host+`":{"auth":"`+auth+`"}}}`)
+	return path
+}
+
+// TestCLIOCIRegistryConfigAuthSuccess drives the full CLI through the REAL
+// acquirer against a Basic-auth registry with the credential coming from
+// --registry-config alone: the per-host file lookup reaches the wire.
+func TestCLIOCIRegistryConfigAuthSuccess(t *testing.T) {
+	reg := ocitest.StartRegistry(t)
+	pushCLIChartArtifact(t, reg, "manifests/app", "v1", "registry-config-artifact-content")
+	reg.EnableBasicAuth("oci-user", "sekrit-pass")
+	root := t.TempDir()
+	writeOCIAppForCLI(t, root, "demo", reg.RepoURL("manifests/app"), ".", "v1")
+	registryConfig := writeCLIRegistryConfig(t, t.TempDir(), reg.Host, "oci-user", "sekrit-pass")
+
+	result := runCLI(t, "build", "apps",
+		"--path", root,
+		"--oci-cache-dir", t.TempDir(),
+		"--registry-config", registryConfig,
+	)
+	assertStdoutContainsAll(t, result, "registry-config-artifact-content")
+}
+
+// TestCLIOCIRegistryConfigWrongPasswordRedacted is the file-sourced twin of
+// TestCLIOCIAuthFailureRedactsCredentials: the wrong password exists only in
+// --registry-config, so only the per-host pre-resolution feeding
+// ociSensitiveValues can keep it and its base64(user:pass) form out of the
+// command error, stdout, stderr (which carries --cache-events for build) and
+// the cache directory. The constraint revision forces the /tags/list GET whose
+// errcode body echoes the Authorization header back.
+func TestCLIOCIRegistryConfigWrongPasswordRedacted(t *testing.T) {
+	reg := ocitest.StartRegistry(t)
+	pushCLIChartArtifact(t, reg, "manifests/app", "1.0.0", "authed-artifact-content")
+	reg.EnableBasicAuth("oci-user", "correct-pass")
+	root := t.TempDir()
+	writeOCIAppForCLI(t, root, "demo", reg.RepoURL("manifests/app"), ".", "~1.0")
+	registryConfig := writeCLIRegistryConfig(t, t.TempDir(), reg.Host, "oci-user", "sekrit-wrong")
+
+	cacheDir := t.TempDir()
+	stdout, stderr, err := executeCLIExpectingError(t, "build", "apps",
+		"--path", root,
+		"--oci-cache-dir", cacheDir,
+		"--registry-config", registryConfig,
+		"--cache-events",
+	)
+	if !strings.Contains(err.Error(), "401") {
+		t.Fatalf("error = %q, want a clear 401 auth error", err)
+	}
+	basicForm := base64.StdEncoding.EncodeToString([]byte("oci-user:sekrit-wrong"))
+	for _, leaked := range []string{"sekrit-wrong", basicForm} {
+		for surface, text := range map[string]string{"error": err.Error(), "stdout": stdout, "stderr": stderr} {
+			if strings.Contains(text, leaked) {
+				t.Fatalf("%s leaked %q:\n%s", surface, leaked, text)
+			}
+		}
+	}
+	if walkErr := filepath.WalkDir(cacheDir, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil || entry.IsDir() {
+			return err
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		for _, leaked := range []string{"sekrit-wrong", basicForm} {
+			if strings.Contains(string(data), leaked) {
+				t.Fatalf("cache file %s leaked %q", path, leaked)
+			}
+		}
+		return nil
+	}); walkErr != nil {
+		t.Fatalf("walk cache dir: %v", walkErr)
+	}
 }
 
 // TestCLIOCIAuthFailureRedactsCredentials pins end-to-end redaction on the
@@ -288,5 +392,88 @@ func TestCLIDiffAppBothSidesShareOCICredentials(t *testing.T) {
 		if opts.Credentials != want {
 			t.Fatalf("acquirer call %d credentials = %#v, want %#v (both diff-app sides must share the flag credentials)", i, opts.Credentials, want)
 		}
+	}
+}
+
+// TestCLIBuildOCIChartShapeWarnsAndRenders drives the reporter's shape through
+// the full CLI and the REAL acquirer: the artifact renders with the
+// helm.valuesObject override on stdout, stderr carries the advisory exactly
+// once, and --strict changes nothing (exit 0, same output, same advisory).
+func TestCLIBuildOCIChartShapeWarnsAndRenders(t *testing.T) {
+	reg := ocitest.StartRegistry(t)
+	ocitest.PushHelmChartArtifact(t, reg, "charts/app-template", "1.2.3", ocitest.HelmChartSpec{Name: "app-template", Version: "1.2.3"})
+	root := t.TempDir()
+	writeOCIChartAppForCLI(t, root, "demo", reg.RepoURL("charts/app-template"), "app-template", "1.2.3", "    helm:\n      valuesObject:\n        message: cli-values-object\n")
+	ociCacheDir := t.TempDir()
+
+	for _, extra := range [][]string{nil, {"--strict"}} {
+		result := runCLI(t, append([]string{"build", "apps", "--path", root, "--oci-cache-dir", ociCacheDir}, extra...)...)
+		assertStdoutContainsAll(t, result, "demo-demo", "cli-values-object")
+		if got := strings.Count(result.Stderr, "source.oci-chart-ignored"); got != 1 {
+			t.Fatalf("args %v: stderr mentions source.oci-chart-ignored %d times, want exactly 1:\n%s", extra, got, result.Stderr)
+		}
+	}
+}
+
+// TestCLIDiffOCIChartShapeWarnsOncePerSide pins the per-side advisory count on
+// the diff surface: two sides, one Application each, exactly two mentions. The
+// sides differ in a helm.valuesObject entry so the default changed-only
+// selection renders the Application on both sides (identical trees select
+// nothing and render nothing).
+func TestCLIDiffOCIChartShapeWarnsOncePerSide(t *testing.T) {
+	reg := ocitest.StartRegistry(t)
+	ocitest.PushHelmChartArtifact(t, reg, "charts/app-template", "1.2.3", ocitest.HelmChartSpec{Name: "app-template", Version: "1.2.3"})
+	left := t.TempDir()
+	right := t.TempDir()
+	for side, message := range map[string]string{left: "left-values", right: "right-values"} {
+		writeOCIChartAppForCLI(t, side, "demo", reg.RepoURL("charts/app-template"), "app-template", "1.2.3", "    helm:\n      valuesObject:\n        message: "+message+"\n")
+	}
+
+	result := runCLI(t, "diff", "apps", "--path-orig", left, "--path", right, "--oci-cache-dir", t.TempDir(), "--exit-code=false")
+	assertStdoutContainsAll(t, result, "left-values", "right-values")
+	if got := strings.Count(result.Stderr, "source.oci-chart-ignored"); got != 2 {
+		t.Fatalf("stderr mentions source.oci-chart-ignored %d times, want exactly one per side:\nstderr:\n%s\nstdout:\n%s", got, result.Stderr, result.Stdout)
+	}
+}
+
+// TestCLIDiagRenderJSONSurfacesOCIChartIgnored pins the structured surface:
+// diag --render -o json reports the advisory with its stable code, warning
+// severity and source category, and nothing reaches stderr.
+func TestCLIDiagRenderJSONSurfacesOCIChartIgnored(t *testing.T) {
+	reg := ocitest.StartRegistry(t)
+	ocitest.PushHelmChartArtifact(t, reg, "charts/app-template", "1.2.3", ocitest.HelmChartSpec{Name: "app-template", Version: "1.2.3"})
+	root := t.TempDir()
+	writeOCIChartAppForCLI(t, root, "demo", reg.RepoURL("charts/app-template"), "app-template", "1.2.3", "")
+
+	result := runCLI(t, "diag", "--path", root, "--render", "-o", "json", "--oci-cache-dir", t.TempDir())
+	if result.Stderr != "" {
+		t.Fatalf("stderr = %q, want empty for structured diag output", result.Stderr)
+	}
+	var report struct {
+		Diagnostics []struct {
+			Code     string `json:"code"`
+			Severity string `json:"severity"`
+			Category string `json:"category"`
+			Message  string `json:"message"`
+		} `json:"diagnostics"`
+	}
+	if err := json.Unmarshal([]byte(result.Stdout), &report); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v\nstdout:\n%s", err, result.Stdout)
+	}
+	var found []string
+	for _, diag := range report.Diagnostics {
+		if diag.Code != "source.oci-chart-ignored" {
+			continue
+		}
+		if diag.Severity != "warning" || diag.Category != "source" {
+			t.Fatalf("diagnostic = %#v, want severity warning in category source", diag)
+		}
+		if !strings.Contains(diag.Message, "path: .") {
+			t.Fatalf("diagnostic message = %q, want the path: . remedy", diag.Message)
+		}
+		found = append(found, diag.Message)
+	}
+	if len(found) != 1 {
+		t.Fatalf("source.oci-chart-ignored diagnostics = %d, want exactly 1:\n%s", len(found), result.Stdout)
 	}
 }

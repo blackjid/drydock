@@ -23,15 +23,7 @@ func (p localProvider) resolveSourceRoot(ctx context.Context, source render.Reso
 // SourceIdentity for the persistent render cache key. A zero identity marks
 // the source persistence-ineligible.
 func (p localProvider) resolveSourceRootIdentity(ctx context.Context, source render.ResolvedSource) (string, SourceIdentity, error) {
-	if source.Path == "" && source.Chart != "" {
-		// DELIBERATE DRYDOCK DIVERGENCE from argo-cd v3.4.5: upstream checks
-		// source.IsOCI() before helm handling and ignores source.Chart for
-		// oci:// URLs (repository.go:349-356,384-420), and IsHelmOciRepo only
-		// accepts schemeless OCI helm repos (util/helm/client.go:439-446) —
-		// strict v3.4.5 would error on oci:// + chart. drydock keeps routing
-		// oci:// + chart (no path) through the existing helm-chart flow:
-		// fleets use that shape and it renders what their clusters run
-		// (fleet-validated). Recorded divergence; regression-pinned.
+	if chartFlowSource(source) {
 		return p.repoRoot, chartOnlySourceIdentity(source), nil
 	}
 	if p.sourceResolver != nil {
@@ -41,15 +33,17 @@ func (p localProvider) resolveSourceRootIdentity(ctx context.Context, source ren
 			return abs, SourceIdentity{}, err
 		}
 	}
-	// OCI classification is total over oci:// spellings and sits AFTER the
-	// repo-map escape hatch (a --repo-map of the oci URL must keep winning)
-	// but BEFORE the path-exists, self-repo, and git-acquisition branches:
-	// `path: .` always exists locally, so falling through would silently
-	// render the local checkout (issue #220's masked failure mode), and
-	// CanonicalGitURLKey strips schemes, so an oci:// URL could otherwise
-	// full-match a git remote in the self-repo branch.
+	// OCI classification is total over oci:// spellings, including
+	// chart-bearing ones (chart is ignored for them, see normalizeOCISource),
+	// and sits AFTER the repo-map escape hatch (a --repo-map of the oci URL
+	// must keep winning, for the chart shape too) but BEFORE the path-exists,
+	// self-repo, and git-acquisition branches: `path: .` always exists
+	// locally, so falling through would silently render the local checkout
+	// (issue #220's masked failure mode), and CanonicalGitURLKey strips
+	// schemes, so an oci:// URL could otherwise full-match a git remote in
+	// the self-repo branch.
 	if ociartifact.IsOCIURL(source.RepoURL) {
-		return p.resolveClassifiedOCISource(ctx, source)
+		return p.resolveOCIArtifactSource(ctx, source)
 	}
 	if source.Path != "" {
 		if exists, err := sourcePathExists(p.repoRoot, source.Path); err != nil {
@@ -132,40 +126,38 @@ func (p localProvider) resolveSourceRootIdentity(ctx context.Context, source ren
 	}, nil
 }
 
-// resolveClassifiedOCISource handles every oci:// source that classification
-// routed away from the local branches: the hybrid chart+path shape errors
-// clearly (never the masked branches), everything else is a first-class OCI
-// artifact source. The chart-only shape never reaches here (it returns before
-// classification).
-func (p localProvider) resolveClassifiedOCISource(ctx context.Context, source render.ResolvedSource) (string, SourceIdentity, error) {
-	if source.Chart != "" {
-		return "", SourceIdentity{}, fmt.Errorf("unsupported source shape: OCI source %s sets both chart %q and path %q; use chart for Helm-chart flow or path for OCI artifact content", ociartifact.RedactURL(source.RepoURL), source.Chart, source.Path)
-	}
-	return p.resolveOCIArtifactSource(ctx, source)
-}
-
 // resolveOCIArtifactSource acquires a first-class OCI artifact source: the
 // revision resolves to a digest, the artifact content extracts into the
 // session snapshot area, and the extraction root becomes the source root.
 func (p localProvider) resolveOCIArtifactSource(ctx context.Context, source render.ResolvedSource) (string, SourceIdentity, error) {
 	acquirer := p.acquisition.OCIArtifactAcquirer(p.ociArtifactAcquirer)
+	// Per-host --registry-config credentials resolve once per source, before
+	// acquisition: the file-sourced password must reach ociSensitiveValues so
+	// cache events and error text redact it, and a missing or unusable file
+	// fails here — at the first oci:// acquisition — rather than at request
+	// construction, where Validate stays TLS-only so git-only runs never see
+	// it. The acquirer's own ForRepository call is a no-op on this copy.
+	effective, err := p.ociCredentials.ForRepository(ctx, source.RepoURL)
+	if err != nil {
+		return "", SourceIdentity{}, p.recordOCIAcquisitionError(source, err, p.ociCredentials)
+	}
 	acquiredFromCache := (*bool)(nil)
 	opts := ociartifact.Options{
 		CacheDir:       p.ociCacheDir,
 		Offline:        p.offline,
 		ForbiddenRoots: append([]string(nil), p.ociForbiddenRoots...),
-		Credentials:    p.ociCredentials,
+		Credentials:    effective,
 		OnAcquired: func(fromImageCache bool) {
 			acquiredFromCache = &fromImageCache
 		},
 	}
 	digest, err := acquirer.Resolve(ctx, source.RepoURL, source.TargetRevision, opts)
 	if err != nil {
-		return "", SourceIdentity{}, p.recordOCIAcquisitionError(source, err)
+		return "", SourceIdentity{}, p.recordOCIAcquisitionError(source, err, effective)
 	}
 	root, _, err := acquirer.Extract(ctx, source.RepoURL, digest, opts)
 	if err != nil {
-		return "", SourceIdentity{}, p.recordOCIAcquisitionError(source, err)
+		return "", SourceIdentity{}, p.recordOCIAcquisitionError(source, err, effective)
 	}
 	// Session-memoized calls skip OnAcquired: only real acquisitions emit an
 	// event, so a two-sided diff at one digest records a single event.
@@ -178,7 +170,7 @@ func (p localProvider) resolveOCIArtifactSource(ctx context.Context, source rend
 			FromCache:         *acquiredFromCache,
 			Network:           !*acquiredFromCache,
 			Offline:           p.offline,
-			SensitiveValues:   ociSensitiveValues(p.ociCredentials),
+			SensitiveValues:   ociSensitiveValues(effective),
 		}))
 		p.recordAcquisition(cacheevent.AcquisitionRecord{
 			Kind:              cacheevent.AcquisitionOCI,
@@ -196,22 +188,40 @@ func (p localProvider) resolveOCIArtifactSource(ctx context.Context, source rend
 	}, nil
 }
 
-func (p localProvider) recordOCIAcquisitionError(source render.ResolvedSource, err error) error {
+// recordOCIAcquisitionError records the failure as a cache event and returns
+// the redacted error. credentials are the ones in effect for the failed step
+// (the per-host resolved set once ForRepository succeeded, the request's own
+// set when ForRepository itself failed), so whichever password was in play is
+// scrubbed from both.
+func (p localProvider) recordOCIAcquisitionError(source render.ResolvedSource, err error, credentials ociartifact.Credentials) error {
 	acquireError := cacheevent.NewAcquisitionError(cacheevent.AcquisitionEventInput{
 		Source:            cacheevent.SourceOCI,
 		Target:            source.RepoURL,
 		RequestedRevision: source.TargetRevision,
 		Offline:           p.offline,
 		Err:               err,
-		SensitiveValues:   ociSensitiveValues(p.ociCredentials),
+		SensitiveValues:   ociSensitiveValues(credentials),
 	})
 	p.recordCacheEvent(acquireError.Event)
 	return fmt.Errorf("%s", acquireError.RedactedError)
 }
 
-// chartOnlySourceIdentity derives the identity from the spec alone: drydock
-// supports exact chart versions only, so name+version fully determine content
-// per registry contract.
+// chartFlowSource reports whether source renders through the Helm chart flow
+// from the provider root: a chart-only source on a schemeless OCI registry or
+// an HTTP(S) Helm repository. An oci:// repoURL never does: Argo CD dispatches
+// on source.IsOCI() before source.IsHelm() (repository.go:358-364,395-427 at
+// v3.5.4; IsOCI is a bare prefix check, types.go:337-339) and IsHelmOciRepo
+// only accepts schemeless registries (util/helm/client.go:446-454), so an
+// oci:// spelling classifies as an artifact source whatever chart says.
+func chartFlowSource(source render.ResolvedSource) bool {
+	return source.Path == "" && source.Chart != "" && !ociartifact.IsOCIURL(source.RepoURL)
+}
+
+// chartOnlySourceIdentity derives the identity of a schemeless-OCI or HTTP(S)
+// chart-only source from the spec alone: drydock supports exact chart versions
+// only, so name+version fully determine content per registry contract. An
+// oci:// source never takes this identity — it resolves to a digest through
+// resolveOCIArtifactSource, chart or no chart.
 func chartOnlySourceIdentity(source render.ResolvedSource) SourceIdentity {
 	version := strings.TrimSpace(source.TargetRevision)
 	if version == "" {

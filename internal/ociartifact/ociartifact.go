@@ -10,8 +10,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -26,6 +28,7 @@ import (
 	"github.com/argoproj/pkg/sync"
 	"github.com/sholdee/drydock/internal/cache"
 	"github.com/sholdee/drydock/internal/pathsafety"
+	"oras.land/oras-go/v2/registry/remote/errcode"
 )
 
 // EntryKind is the cache metadata kind recorded for OCI artifact image
@@ -320,8 +323,16 @@ func rejectURLUserinfo(repoURL string) error {
 	return fmt.Errorf("OCI artifact %s: %q and %q are not allowed in an OCI repository URL; put digests in targetRevision and credentials in --oci-username/--oci-password", RedactURL(repoURL), "@", "%")
 }
 
-func (a DefaultAcquirer) newClient(repoURL string, cacheDir string, credentials Credentials, extraOpts ...oci.ClientOpts) (oci.Client, error) {
-	creds, err := clientCreds(repoURL, credentials)
+// newClient resolves per-host --registry-config credentials before building
+// the vendored client, so any Options.Credentials carrying RegistryConfig
+// works (direct DefaultAcquirer users included); the app layer pre-resolves
+// once per source for redaction, and for that copy ForRepository is a no-op.
+func (a DefaultAcquirer) newClient(ctx context.Context, repoURL string, cacheDir string, credentials Credentials, extraOpts ...oci.ClientOpts) (oci.Client, error) {
+	effective, err := credentials.ForRepository(ctx, repoURL)
+	if err != nil {
+		return nil, err
+	}
+	creds, err := clientCreds(repoURL, effective)
 	if err != nil {
 		return nil, err
 	}
@@ -389,7 +400,7 @@ func (a DefaultAcquirer) Resolve(ctx context.Context, repoURL, revision string, 
 		return resolveOffline(cacheDir, repoURL, revision)
 	}
 	memo := &prefetchedTagsCache{}
-	client, err := a.newClient(repoURL, cacheDir, opts.Credentials, oci.WithIndexCache(memo))
+	client, err := a.newClient(ctx, repoURL, cacheDir, opts.Credentials, oci.WithIndexCache(memo))
 	if err != nil {
 		// Defense-in-depth: construction errors surface with the redacted URL
 		// even though userinfo was already rejected above.
@@ -425,6 +436,9 @@ func resolveOnline(ctx context.Context, client oci.Client, memo *prefetchedTagsC
 	// instead of the tag's own digest.
 	digest, err := client.ResolveRevision(ctx, revision, false)
 	if err != nil {
+		if isAuthError(err) {
+			return "", fmt.Errorf("authenticate OCI artifact %s revision %q: %w; pass --registry-config or --oci-username/--oci-password (registries answer 401/403 for private and for nonexistent repositories alike)", RedactURL(repoURL), revision, err)
+		}
 		return "", fmt.Errorf("resolve OCI artifact %s revision %q: %w", RedactURL(repoURL), revision, err)
 	}
 	if !versions.IsConstraint(revision) {
@@ -482,6 +496,30 @@ func offlineResolveMiss(repoURL, revision string) error {
 	return fmt.Errorf("offline cache miss for OCI artifact %s revision %q", RedactURL(repoURL), revision)
 }
 
+// isAuthError reports whether a registry round trip failed on
+// authentication or authorization, so the Resolve/Extract wraps can name the
+// credential flags instead of a bare "resolve"/"extract" failure. Typed
+// first: oras answers every non-2xx registry response (other than the 404 it
+// maps to errdef.ErrNotFound) with *errcode.ErrorResponse, and the vendored
+// argo client wraps it with %w at every level (util/oci/client.go:472
+// resolveDigest, :337 extract), so errors.As reaches it through the chain and
+// its status code is authoritative. The text fallback exists for errors that
+// lost the type and matches only the words "unauthorized" and
+// "authentication required": never bare digits, because the Extract wrap
+// embeds a 64-hex digest that can spell 401 or 403, and never the word
+// denied on its own, because a filesystem permission-denied error during
+// extraction is not an auth failure.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if resp, ok := errors.AsType[*errcode.ErrorResponse](err); ok {
+		return resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "unauthorized") || strings.Contains(msg, "authentication required")
+}
+
 // Extract materializes the artifact content for digest. With a committed
 // image tar cached, the argo client extracts locally without network; offline
 // without a cached tar it fails with the offline cache miss contract error
@@ -505,7 +543,7 @@ func (a DefaultAcquirer) Extract(ctx context.Context, repoURL, digest string, op
 	if opts.Offline && !fromImageCache {
 		return "", nil, fmt.Errorf("offline cache miss for OCI artifact %s digest %s", RedactURL(repoURL), digest)
 	}
-	client, err := a.newClient(repoURL, cacheDir, opts.Credentials)
+	client, err := a.newClient(ctx, repoURL, cacheDir, opts.Credentials)
 	if err != nil {
 		// Defense-in-depth: construction errors surface with the redacted URL
 		// even though userinfo was already rejected above.
@@ -519,6 +557,9 @@ func (a DefaultAcquirer) Extract(ctx context.Context, repoURL, digest string, op
 		dir, closer, err = extractAttempt(ctx, client, entry, digest)
 	}
 	if err != nil {
+		if isAuthError(err) {
+			return "", nil, fmt.Errorf("authenticate OCI artifact %s digest %s: %w; pass --registry-config or --oci-username/--oci-password (registries answer 401/403 for private and for nonexistent repositories alike)", RedactURL(repoURL), digest, err)
+		}
 		return "", nil, fmt.Errorf("extract OCI artifact %s digest %s: %w", RedactURL(repoURL), digest, err)
 	}
 	writeEntryMetadata(entry, repoURL, digest)
