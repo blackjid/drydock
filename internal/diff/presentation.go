@@ -7,12 +7,7 @@ import (
 	"github.com/pmezard/go-difflib/difflib"
 )
 
-func unified(doc Document, from, to string, opts Options) (string, error) {
-	header := headerOf(doc)
-	displayFrom, displayTo, err := displayBodies(doc, from, to)
-	if err != nil {
-		return "", fmt.Errorf("diff %s: %w", header, err)
-	}
+func unified(header, displayFrom, displayTo string, opts Options) (string, error) {
 	diff, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
 		A:        splitUnifiedLines(displayFrom),
 		B:        splitUnifiedLines(displayTo),

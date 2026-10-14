@@ -1,5 +1,7 @@
 package diff
 
+import "fmt"
+
 type Parent struct {
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty"`
 	Name        string `json:"name" yaml:"name"`
@@ -43,7 +45,18 @@ type Result struct {
 	Resource Resource `json:"resource" yaml:"resource"`
 	Change   Change   `json:"change" yaml:"change"`
 	Diff     string   `json:"diff" yaml:"diff"`
+	// Before and After are the display bodies the unified Diff was built
+	// from (Secret values already redacted). They feed alternate renderers
+	// and are not part of the structured output.
+	Before string `json:"-" yaml:"-"`
+	After  string `json:"-" yaml:"-"`
 }
+
+// Header is the human-readable identity line used in the unified diff headers.
+func (r Result) Header() string {
+	return headerOf(Document{Parent: r.Parent, Resource: r.Resource})
+}
+
 type Options struct {
 	Unified           int
 	StripAttrs        []string
@@ -131,7 +144,12 @@ func changedDocument(left, right Document, hasLeft, hasRight bool, leftBody, rig
 	}
 }
 func resultFor(doc Document, change Change, from, to string, opts Options) (Result, error) {
-	diff, err := unified(doc, from, to, opts)
+	header := headerOf(doc)
+	displayFrom, displayTo, err := displayBodies(doc, from, to)
+	if err != nil {
+		return Result{}, fmt.Errorf("diff %s: %w", header, err)
+	}
+	diff, err := unified(header, displayFrom, displayTo, opts)
 	if err != nil {
 		return Result{}, err
 	}
@@ -140,5 +158,7 @@ func resultFor(doc Document, change Change, from, to string, opts Options) (Resu
 		Resource: doc.Resource,
 		Change:   change,
 		Diff:     diff,
+		Before:   displayFrom,
+		After:    displayTo,
 	}, nil
 }
