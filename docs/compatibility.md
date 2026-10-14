@@ -451,6 +451,8 @@ Supported:
   temporary local snapshots, without `git` shellouts or checkout mutation.
 - Git-style ANSI color for text diff output with
   `--color=auto|always|never`; JSON and YAML payloads remain plain.
+- `diff apps` and `diff app` `-o dyff` structural reports rendered in-process
+  by the dyff library.
 - Changed-only Application selection with safe render-all fallback and strict
   failure mode.
 - Default diff ignores for common Helm chart/version labels and pod-template

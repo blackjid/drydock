@@ -353,7 +353,10 @@ without rendering. Strict changed-only diagnostics apply only to the remaining
 considered paths. Do not auto-load implicit policy files without a design
 update; explicit CLI/API/action policy is intentional.
 
-Manifest diff output supports unified diff, markdown, JSON, and YAML. Image
+Manifest diff output supports unified diff, dyff, markdown, JSON, and YAML.
+`-o dyff` renders each changed resource's redacted display bodies through the
+in-process dyff library (never the `dyff` binary) and is not available for
+`diff images`. Image
 diff output supports unified diff, markdown, JSON, and YAML for `added`,
 `removed`, and `unchanged` image lists. Image markdown output is comment-facing
 and omits unchanged images by default. `diff images -o name` prints current-only

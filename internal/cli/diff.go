@@ -11,6 +11,7 @@ import (
 	cliformat "github.com/sholdee/drydock/internal/format"
 	"github.com/sholdee/drydock/internal/report"
 	"github.com/sholdee/drydock/internal/report/diffhtml"
+	"github.com/sholdee/drydock/internal/report/dyffreport"
 	"github.com/sholdee/drydock/internal/source"
 	"github.com/spf13/cobra"
 )
@@ -73,7 +74,7 @@ func newDiffAppsCommand(info VersionInfo, deps Dependencies) *cobra.Command {
 				}
 				return err
 			}
-			diffColor := output == diffOutputUnified && shouldColorDiffOutput(colorMode, deps, cmd.OutOrStdout())
+			diffColor := (output == diffOutputUnified || output == diffOutputDyff) && shouldColorDiffOutput(colorMode, deps, cmd.OutOrStdout())
 			return renderDiffResult(cmd, result, !appsFlags.exitCode, output, diffColor, diagnosticColor, appsRawOutputFile, appsHTMLOutputFile, appsMarkdownMaxBytes, markdownDiagnostics)
 		},
 	}
@@ -132,7 +133,7 @@ func newDiffAppCommand(info VersionInfo, deps Dependencies) *cobra.Command {
 				}
 				return err
 			}
-			diffColor := output == diffOutputUnified && shouldColorDiffOutput(colorMode, deps, cmd.OutOrStdout())
+			diffColor := (output == diffOutputUnified || output == diffOutputDyff) && shouldColorDiffOutput(colorMode, deps, cmd.OutOrStdout())
 			return renderDiffResult(cmd, result, !appFlags.exitCode, output, diffColor, diagnosticColor, appRawOutputFile, appHTMLOutputFile, appMarkdownMaxBytes, markdownDiagnostics)
 		},
 	}
@@ -217,7 +218,7 @@ func bindDiffColorFlag(cmd *cobra.Command, colorMode *string) {
 	cmd.Flags().StringVar(colorMode, "color", *colorMode, "color diff output: auto, always, or never")
 }
 
-func bindDiffReportFileFlags(cmd *cobra.Command, markdownMaxBytes *int, markdownDiagnostics *string, rawOutputFile, htmlOutputFile *string) {
+func bindDiffReportFileFlags(cmd *cobra.Command, markdownMaxBytes *int, markdownDiagnostics, rawOutputFile, htmlOutputFile *string) {
 	bindDiffMarkdownMaxBytesFlag(cmd, markdownMaxBytes)
 	bindDiffMarkdownDiagnosticsFlag(cmd, markdownDiagnostics)
 	cmd.Flags().StringVar(rawOutputFile, "raw-output-file", *rawOutputFile, "write full uncolored unified diff output to this file")
@@ -307,6 +308,8 @@ func writeDiffCommandOutput(w io.Writer, result app.DiffResult, output string, d
 	switch output {
 	case diffOutputUnified:
 		return writeUnifiedDiffOutput(w, result, diffColor)
+	case diffOutputDyff:
+		return dyffreport.Write(w, result.Results, diffColor)
 	case diffOutputMarkdown:
 		_, err := report.WriteDiffMarkdown(w, result, report.MarkdownOptions{MaxBytes: markdownMaxBytes, Diagnostics: markdownDiagnostics})
 		return err

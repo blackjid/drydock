@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1970,4 +1971,65 @@ data:
     ignoreResourceStatusField: `+statusMode+`
     ignoreAggregatedRoles: `+strconv.FormatBool(ignoreAggregatedRoles)+`
 `)
+}
+
+func TestDiffAppsDyffOutput(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+
+	result := runCLI(t, "diff", "apps", "--path-orig", left, "--path", right, "-o", "dyff", "--exit-code=false")
+
+	assertStdoutExcludesAll(t, result, "\x1b[", "--- ", "@@")
+	for _, want := range []string{"data.value", "old", "new"} {
+		if !strings.Contains(result.Stdout, want) {
+			t.Fatalf("stdout = %q, want %q", result.Stdout, want)
+		}
+	}
+}
+
+func TestDiffAppDyffOutputHonorsColorAlways(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+
+	result := runCLI(t, "diff", "app", "demo", "--path-orig", left, "--path", right, "-o", "dyff", "--color=always", "--exit-code=false")
+
+	if !strings.Contains(result.Stdout, "\x1b[") {
+		t.Fatalf("stdout = %q, want ANSI colors", result.Stdout)
+	}
+}
+
+func TestDiffAppsDyffOutputExitsOneOnDiff(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+
+	cmd := NewRootCommand(VersionInfo{})
+	cmd.SetArgs([]string{"diff", "apps", "--path-orig", left, "--path", right, "-o", "dyff"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	var exitErr ExitError
+	if err := cmd.Execute(); !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("Execute() error = %v, want exit code 1", err)
+	}
+}
+
+func TestDiffImagesRejectsDyffOutput(t *testing.T) {
+	cmd := NewRootCommandWithDependencies(VersionInfo{}, Dependencies{Orchestrator: &recordingCLIOrchestrator{}})
+	cmd.SetArgs([]string{"diff", "images", "--path-orig", "left", "--path", "right", "-o", "dyff"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "dyff output is not supported for diff images") {
+		t.Fatalf("Execute() error = %v, want dyff unsupported for diff images", err)
+	}
 }
