@@ -4,9 +4,12 @@
 package dyffreport
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"unicode"
 
 	"github.com/gonvenience/bunt"
@@ -41,6 +44,14 @@ func Write(w io.Writer, results []diff.Result, color bool) error {
 	return nil
 }
 
+// Fixed size for GitHubBody so the report never depends on the terminal or
+// pipe it runs under. It is wide enough that short order changes use the
+// `- a, b` / `+ b, a` form GitHub colors instead of a side-by-side table.
+const (
+	githubWidth  = 200
+	githubHeight = 25
+)
+
 // configure sets dyff's process-wide color mode and terminal size and returns
 // a function that restores the defaults. True color stays off so output does
 // not depend on COLORTERM.
@@ -56,6 +67,53 @@ func configure(color bool, width, height int) func() {
 		bunt.SetColorSettings(bunt.AUTO, bunt.AUTO)
 		term.FixedTerminalWidth, term.FixedTerminalHeight = prevWidth, prevHeight
 	}
+}
+
+// GitHubBody renders one result in dyff's GitHub style, the same format as
+// `dyff between -o github`, for embedding in a markdown ```diff fence: path
+// lines as `@@ path @@`, the resource identity as `# apiVersion/kind/ns/name`,
+// and `!` before the change type. The text is plain; GitHub colors the fence.
+// Like Write, it falls back to the unified diff when dyff cannot produce a
+// structural report. Not safe for concurrent use (see Write).
+func GitHubBody(result diff.Result) string {
+	defer configure(false, githubWidth, githubHeight)()
+
+	report, err := compare(result)
+	if err == nil && len(report.Diffs) == 0 {
+		err = errors.New("no structural differences found")
+	}
+	if err != nil {
+		return fmt.Sprintf("# dyff: %v; showing unified diff\n%s", err, result.Diff)
+	}
+	// dyff only prints the per-change resource identity line when the input
+	// has several documents, but every report here covers a single resource.
+	// Its document count is read from the report copy only, so padding it
+	// enables the line without altering the compared documents. Added
+	// resources have no before document, so pad to two.
+	documents := slices.Clip(report.From.Documents)
+	for len(documents) < 2 {
+		documents = append(documents, nil)
+	}
+	report.From.Documents = documents
+
+	github := &dyff.DiffSyntaxReport{
+		PathPrefix:            "@@",
+		RootDescriptionPrefix: "#",
+		ChangeTypePrefix:      "!",
+		Report:                report,
+		NoTableStyle:          true,
+		DoNotInspectCerts:     true,
+		OmitHeader:            true,
+		PrefixMultiline:       true,
+		MinorChangeThreshold:  0.1,
+		MultilineContextLines: 4,
+		UseIndentLines:        true,
+	}
+	var out bytes.Buffer
+	if err := github.WriteReport(&out); err != nil {
+		return fmt.Sprintf("# dyff: %v; showing unified diff\n%s", err, result.Diff)
+	}
+	return strings.Trim(out.String(), "\n") + "\n"
 }
 
 func writeResult(w io.Writer, result diff.Result, color bool) error {

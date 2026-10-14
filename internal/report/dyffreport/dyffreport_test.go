@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gonvenience/bunt"
+	"github.com/gonvenience/term"
 	"github.com/sholdee/drydock/internal/diff"
 )
 
@@ -185,6 +186,73 @@ func TestWriteResetsColorSettings(t *testing.T) {
 	}
 }
 
+func TestGitHubBodyMatchesDyffGitHubStyle(t *testing.T) {
+	left := configMapDocument("cm", "old")
+	left.Body = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: default\ndata:\n  image: registry.example/app:v1\n"
+	right := left
+	right.Body = strings.Replace(left.Body, "app:v1", "app:v2", 1)
+	results := runDiff(t, []diff.Document{left}, []diff.Document{right})
+
+	got := GitHubBody(results[0])
+
+	want := "@@ data.image @@\n" +
+		"# v1/ConfigMap/default/cm\n" +
+		"! \u00b1 value change\n" +
+		"- registry.example/app:v1\n" +
+		"+ registry.example/app:v2\n"
+	if got != want {
+		t.Errorf("GitHubBody() =\n%s\nwant\n%s", got, want)
+	}
+	if strings.Contains(got, "\x1b[") {
+		t.Errorf("GitHubBody() contains ANSI escapes: %q", got)
+	}
+}
+
+func TestGitHubBodyAddedAndRemoved(t *testing.T) {
+	for name, results := range map[string][]diff.Result{
+		"added":   runDiff(t, nil, []diff.Document{configMapDocument("fresh", "v")}),
+		"removed": runDiff(t, []diff.Document{configMapDocument("gone", "v")}, nil),
+	} {
+		got := GitHubBody(results[0])
+		if !strings.Contains(got, "@@ ") || !strings.Contains(got, "document "+name) {
+			t.Errorf("%s: GitHubBody() missing path or %q report:\n%s", name, "document "+name, got)
+		}
+		if strings.Contains(got, "showing unified diff") {
+			t.Errorf("%s: GitHubBody() fell back to the unified diff:\n%s", name, got)
+		}
+	}
+}
+
+func TestGitHubBodyKeepsSecretValuesRedacted(t *testing.T) {
+	secret := func(value string) diff.Document {
+		return diff.Document{
+			Parent:   diff.Parent{Name: "demo"},
+			Resource: diff.Resource{Kind: "Secret", Namespace: "default", Name: "creds"},
+			Body: "apiVersion: v1\nkind: Secret\nmetadata:\n  name: creds\n  namespace: default\n" +
+				"stringData:\n  password: " + value + "\n",
+		}
+	}
+	results := runDiff(t, []diff.Document{secret("hunter2-old")}, []diff.Document{secret("hunter2-new")})
+
+	if got := GitHubBody(results[0]); strings.Contains(got, "hunter2") {
+		t.Fatalf("GitHubBody() leaks Secret values:\n%s", got)
+	}
+}
+
+func TestGitHubBodyFallsBackToUnifiedDiff(t *testing.T) {
+	result := diff.Result{
+		Diff:   "--- x\n+++ x\n-a\n+b\n",
+		Before: "key: [unterminated\n",
+		After:  "key: [unterminated2\n",
+	}
+
+	got := GitHubBody(result)
+
+	if !strings.Contains(got, "showing unified diff") || !strings.Contains(got, "+b\n") {
+		t.Errorf("GitHubBody() = %q, want unified fallback", got)
+	}
+}
+
 func TestControlCharactersFallBackToUnifiedDiff(t *testing.T) {
 	for name, value := range map[string]string{
 		"escape sequence": `"new\x1b[1A\x1b]8;;https://evil\x07"`,
@@ -194,12 +262,16 @@ func TestControlCharactersFallBackToUnifiedDiff(t *testing.T) {
 			[]diff.Document{configMapDocument("cm", `"old"`)},
 			[]diff.Document{configMapDocument("cm", value)})
 
-		got := render(t, results, false)
-		if strings.ContainsAny(got, "\x1b\x07\r") {
-			t.Errorf("%s: output contains raw control characters: %q", name, got)
-		}
-		if !strings.Contains(got, "values contain control characters") {
-			t.Errorf("%s: output did not fall back to the unified diff:\n%s", name, got)
+		for output, got := range map[string]string{
+			"Write":      render(t, results, false),
+			"GitHubBody": GitHubBody(results[0]),
+		} {
+			if strings.ContainsAny(got, "\x1b\x07\r") {
+				t.Errorf("%s/%s: output contains raw control characters: %q", name, output, got)
+			}
+			if !strings.Contains(got, "values contain control characters") {
+				t.Errorf("%s/%s: output did not fall back to the unified diff:\n%s", name, output, got)
+			}
 		}
 	}
 }
@@ -209,8 +281,8 @@ func TestMultilineValuesAndTabsAreNotControlCharacters(t *testing.T) {
 		[]diff.Document{configMapDocument("cm", `"a\nb\tc"`)},
 		[]diff.Document{configMapDocument("cm", `"a\nb\tchanged"`)})
 
-	if got := render(t, results, false); strings.Contains(got, "showing unified diff") {
-		t.Errorf("Write() fell back for multi-line value:\n%s", got)
+	if got := GitHubBody(results[0]); strings.Contains(got, "showing unified diff") {
+		t.Errorf("GitHubBody() fell back for multi-line value:\n%s", got)
 	}
 }
 
@@ -220,9 +292,52 @@ func TestMultilineKeysFallBackToUnifiedDiff(t *testing.T) {
 	forged.Body = strings.Replace(doc.Body, "  key: old", "  \"k\\n@@ forged.path @@\": old", 1)
 	results := runDiff(t, []diff.Document{doc}, []diff.Document{forged})
 
-	got := render(t, results, false)
+	got := GitHubBody(results[0])
 
 	if strings.Contains(got, "\n@@ forged.path @@") || !strings.Contains(got, "showing unified diff") {
-		t.Errorf("Write() let a multi-line key forge a path line:\n%s", got)
+		t.Errorf("GitHubBody() let a multi-line key forge a path line:\n%s", got)
+	}
+}
+
+func TestGitHubBodyAddedResourceHasIdentityLine(t *testing.T) {
+	got := GitHubBody(runDiff(t, nil, []diff.Document{configMapDocument("fresh", "v")})[0])
+
+	if !strings.Contains(got, "# v1/ConfigMap/default/fresh") {
+		t.Errorf("GitHubBody() missing identity line for added resource:\n%s", got)
+	}
+}
+
+func TestGitHubBodyIgnoresTerminalSize(t *testing.T) {
+	body := func(items ...string) diff.Document {
+		return diff.Document{
+			Parent:   diff.Parent{Name: "demo"},
+			Resource: diff.Resource{Kind: "ConfigMap", Namespace: "default", Name: "cm"},
+			Body: "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cm\n  namespace: default\nitems:\n  - " +
+				strings.Join(items, "\n  - ") + "\n",
+		}
+	}
+	results := runDiff(t, []diff.Document{body("alpha", "bravo", "charlie")}, []diff.Document{body("charlie", "bravo", "alpha")})
+
+	term.FixedTerminalWidth, term.FixedTerminalHeight = 20, 5
+	t.Cleanup(func() { term.FixedTerminalWidth, term.FixedTerminalHeight = -1, -1 })
+	got := GitHubBody(results[0])
+
+	if !strings.Contains(got, "- alpha, bravo, charlie\n+ charlie, bravo, alpha\n") {
+		t.Errorf("GitHubBody() order change depends on the terminal size:\n%s", got)
+	}
+	if term.FixedTerminalWidth != 20 || term.FixedTerminalHeight != 5 {
+		t.Errorf("terminal size = %dx%d after GitHubBody, want the previous 20x5",
+			term.FixedTerminalWidth, term.FixedTerminalHeight)
+	}
+}
+
+func TestGitHubBodyResetsColorSettings(t *testing.T) {
+	results := runDiff(t,
+		[]diff.Document{configMapDocument("cm", "old")},
+		[]diff.Document{configMapDocument("cm", "new")})
+	GitHubBody(results[0])
+
+	if got := bunt.ColorSetting.String(); got != "auto" {
+		t.Errorf("bunt color setting = %q after GitHubBody, want auto", got)
 	}
 }

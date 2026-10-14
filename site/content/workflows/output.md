@@ -52,6 +52,28 @@ and `--html-output-file` still write the unified form.
 drydock diff apps --repo . --ref HEAD --ref-orig origin/main -o dyff
 ```
 
+For pull request comments, `--markdown-diff-style dyff` keeps `-o markdown` but
+writes each Application's changes as dyff's GitHub-style report (the
+`dyff between -o github` format) inside the `diff` fence, so GitHub colors the
+path, change type, and added and removed values. The default is `unified`.
+Unlike the `dyff` CLI, drydock compares values exactly (no inline-JSON or
+number normalization), does not inspect certificates, and falls back to the
+unified diff for a resource whose values contain control characters.
+The summary counts, size budget, `--raw-output-file`, and `--html-output-file`
+still use the unified diff.
+
+```bash
+drydock diff apps --repo . --ref HEAD --ref-orig origin/main -o markdown --markdown-diff-style dyff
+```
+
+```diff
+@@ spec.template.spec.containers.app.image @@
+# apps/v1/Deployment/default/app
+! ± value change
+- registry.example/app:v1
++ registry.example/app:v2
+```
+
 Use markdown output when the result will be read in a pull request comment:
 
 ```bash
