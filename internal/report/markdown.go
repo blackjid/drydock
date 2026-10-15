@@ -12,6 +12,7 @@ import (
 	"github.com/sholdee/drydock/internal/app"
 	"github.com/sholdee/drydock/internal/diagnostic"
 	"github.com/sholdee/drydock/internal/diff"
+	"github.com/sholdee/drydock/internal/report/dyffreport"
 )
 
 const (
@@ -26,6 +27,44 @@ type MarkdownOptions struct {
 	DiagnosticLimit int
 	Title           string
 	Diagnostics     DiagnosticsMode
+	DiffStyle       DiffStyle
+}
+
+// DiffStyle selects how each Application's changes are written inside its
+// markdown <details> block. Summary counts, byte budgets, and the raw and
+// HTML side outputs always use the unified diff.
+type DiffStyle string
+
+const (
+	// DiffStyleUnified embeds the unified diff in a ```diff fence.
+	DiffStyleUnified DiffStyle = "unified"
+	// DiffStyleDyff embeds dyff's GitHub-style structural report in a ```diff
+	// fence.
+	DiffStyleDyff DiffStyle = "dyff"
+)
+
+func ParseDiffStyle(value string) (DiffStyle, error) {
+	style := DiffStyle(strings.ToLower(strings.TrimSpace(value))).Normalize()
+	if err := style.Validate(); err != nil {
+		return "", err
+	}
+	return style, nil
+}
+
+func (style DiffStyle) Normalize() DiffStyle {
+	if style == "" {
+		return DiffStyleUnified
+	}
+	return style
+}
+
+func (style DiffStyle) Validate() error {
+	switch style.Normalize() {
+	case DiffStyleUnified, DiffStyleDyff:
+		return nil
+	default:
+		return fmt.Errorf("markdown diff style must be unified or dyff, got %q", string(style))
+	}
 }
 
 // DiagnosticsMode controls how much of the diagnostics list the markdown
@@ -121,10 +160,14 @@ func DiffMarkdown(result app.DiffResult, options MarkdownOptions) ([]byte, Markd
 	if err := diagnosticsMode.Validate(); err != nil {
 		return nil, MarkdownResult{}, err
 	}
+	diffStyle := options.DiffStyle.Normalize()
+	if err := diffStyle.Validate(); err != nil {
+		return nil, MarkdownResult{}, err
+	}
 
 	groups := groupedDiffs(result.Results)
 	totalAdded, totalRemoved := totalLineChanges(groups)
-	state := markdownState{maxBytes: options.MaxBytes}
+	state := markdownState{maxBytes: options.MaxBytes, diffStyle: diffStyle}
 	state.appendRequired(fmt.Sprintf("## %s\n\n", escapeMarkdownText(options.Title)))
 	state.appendRequired(summaryMarkdown(len(result.Results), len(groups), totalAdded, totalRemoved, result.Diagnostics))
 	errorsPart, warningsPart := diagnosticsMarkdown(result.Diagnostics, options.DiagnosticLimit, diagnosticsMode)
@@ -202,6 +245,7 @@ type markdownState struct {
 	maxBytes  int
 	truncated bool
 	shownApps int
+	diffStyle DiffStyle
 }
 
 func (s *markdownState) appendRequired(text string) {
@@ -235,7 +279,7 @@ func (s *markdownState) appendAppDetails(groups []appGroup, openDetails bool) {
 	}
 	allocations := allocateAppBudgets(groups, remaining, s.maxBytes == 0)
 	for i, group := range groups {
-		detail, truncated := appDetailMarkdown(group, allocations[i], openDetails)
+		detail, truncated := appDetailMarkdown(group, allocations[i], openDetails, s.diffStyle)
 		if detail == "" {
 			s.truncated = true
 			return
@@ -682,11 +726,15 @@ func allocateAppBudgets(groups []appGroup, budget int, unlimited bool) []int {
 	return allocations
 }
 
-func appDetailMarkdown(group appGroup, budget int, openDetails bool) (string, bool) {
-	diffText := rawGroupDiff(group)
-	truncated := false
+func appDetailMarkdown(group appGroup, budget int, openDetails bool, style DiffStyle) (string, bool) {
+	limit := 0
 	if budget > 0 {
-		diffText, truncated = excerptDiff(diffText, max(budget/2, 128))
+		limit = max(budget/2, 128)
+	}
+	diffText := groupDiffText(group, style, limit)
+	truncated := false
+	if limit > 0 {
+		diffText, truncated = excerptDiff(diffText, limit, style)
 	}
 	fence := codeFence(diffText)
 	var builder strings.Builder
@@ -716,19 +764,34 @@ func appDetailMarkdown(group appGroup, budget int, openDetails bool) (string, bo
 	return out, truncated
 }
 
-func rawGroupDiff(group appGroup) string {
+// groupDiffText joins the group's per-resource diffs. With a positive limit
+// it stops once the text is already longer than that, because excerptDiff
+// would discard the rest and dyff rendering is comparatively slow.
+func groupDiffText(group appGroup, style DiffStyle, limit int) string {
 	var builder strings.Builder
 	for _, item := range group.resources {
-		builder.WriteString(item.Diff)
+		if style == DiffStyleDyff {
+			builder.WriteString(dyffreport.GitHubBody(item))
+		} else {
+			builder.WriteString(item.Diff)
+		}
+		if limit > 0 && builder.Len() > limit {
+			break
+		}
 	}
 	return builder.String()
 }
 
-func excerptDiff(text string, maxBytes int) (string, bool) {
+func excerptDiff(text string, maxBytes int, style DiffStyle) (string, bool) {
 	if maxBytes <= 0 || len(text) <= maxBytes {
 		return text, false
 	}
+	// dyff's GitHub style reads `@@` lines as change paths, so its marker is
+	// a comment line instead.
 	marker := "\n@@ drydock skipped remaining diff lines @@\n"
+	if style == DiffStyleDyff {
+		marker = "\n# drydock skipped remaining diff lines\n"
+	}
 	limit := maxBytes - len(marker)
 	if limit <= 0 {
 		return strings.TrimLeft(marker, "\n"), true

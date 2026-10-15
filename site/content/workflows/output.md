@@ -14,7 +14,7 @@ Use `-o` or `--output` to select the format supported by each command:
 | `build apps`, `build app` | `yaml`, `json` |
 | `get apps`, `get images` | `table`, `name`, `json`, `yaml` |
 | `test apps`, `test app` | `text`, `json`, `yaml` |
-| `diff apps`, `diff app` | `unified`, `markdown`, `json`, `yaml` |
+| `diff apps`, `diff app` | `unified`, `dyff`, `markdown`, `json`, `yaml` |
 | `diff images` | `unified`, `markdown`, `json`, `yaml`, `name` |
 | `diag` | `text`, `json`, `yaml` |
 
@@ -38,9 +38,41 @@ plain and buffered.
 
 ## Diff Controls
 
-Unified manifest and image diffs support terminal color with
-`--color=auto|always|never`. The default `auto` colors only when stdout is a
-terminal. JSON and YAML outputs never include ANSI color.
+Unified and dyff manifest diffs and unified image diffs support terminal color
+with `--color=auto|always|never`. The default `auto` colors only when stdout is
+a terminal. JSON and YAML outputs never include ANSI color.
+
+`-o dyff` renders each changed resource as a structural, path-based report
+using the [dyff](https://github.com/homeport/dyff) library, which runs
+in-process (no `dyff` binary is needed). It is available for `diff apps` and
+`diff app`, not `diff images`. Secret values stay redacted, and `--raw-output-file`
+and `--html-output-file` still write the unified form.
+
+```bash
+drydock diff apps --repo . --ref HEAD --ref-orig origin/main -o dyff
+```
+
+For pull request comments, `--markdown-diff-style dyff` keeps `-o markdown` but
+writes each Application's changes as dyff's GitHub-style report (the
+`dyff between -o github` format) inside the `diff` fence, so GitHub colors the
+path, change type, and added and removed values. The default is `unified`.
+Unlike the `dyff` CLI, drydock compares values exactly (no inline-JSON or
+number normalization), does not inspect certificates, and falls back to the
+unified diff for a resource whose values contain control characters.
+The summary counts, size budget, `--raw-output-file`, and `--html-output-file`
+still use the unified diff.
+
+```bash
+drydock diff apps --repo . --ref HEAD --ref-orig origin/main -o markdown --markdown-diff-style dyff
+```
+
+```diff
+@@ spec.template.spec.containers.app.image @@
+# apps/v1/Deployment/default/app
+! ± value change
+- registry.example/app:v1
++ registry.example/app:v2
+```
 
 Use markdown output when the result will be read in a pull request comment:
 

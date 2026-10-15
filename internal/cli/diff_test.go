@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -1970,4 +1971,117 @@ data:
     ignoreResourceStatusField: `+statusMode+`
     ignoreAggregatedRoles: `+strconv.FormatBool(ignoreAggregatedRoles)+`
 `)
+}
+
+func TestDiffAppsDyffOutput(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+
+	result := runCLI(t, "diff", "apps", "--path-orig", left, "--path", right, "-o", "dyff", "--exit-code=false")
+
+	assertStdoutExcludesAll(t, result, "\x1b[", "--- ", "@@")
+	for _, want := range []string{"data.value", "old", "new"} {
+		if !strings.Contains(result.Stdout, want) {
+			t.Fatalf("stdout = %q, want %q", result.Stdout, want)
+		}
+	}
+}
+
+func TestDiffAppDyffOutputHonorsColorAlways(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+
+	result := runCLI(t, "diff", "app", "demo", "--path-orig", left, "--path", right, "-o", "dyff", "--color=always", "--exit-code=false")
+
+	if !strings.Contains(result.Stdout, "\x1b[") {
+		t.Fatalf("stdout = %q, want ANSI colors", result.Stdout)
+	}
+}
+
+func TestDiffAppsDyffOutputExitsOneOnDiff(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+
+	cmd := NewRootCommand(VersionInfo{})
+	cmd.SetArgs([]string{"diff", "apps", "--path-orig", left, "--path", right, "-o", "dyff"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	var exitErr ExitError
+	if err := cmd.Execute(); !errors.As(err, &exitErr) || exitErr.Code != 1 {
+		t.Fatalf("Execute() error = %v, want exit code 1", err)
+	}
+}
+
+func TestDiffImagesRejectsDyffOutput(t *testing.T) {
+	cmd := NewRootCommandWithDependencies(VersionInfo{}, Dependencies{Orchestrator: &recordingCLIOrchestrator{}})
+	cmd.SetArgs([]string{"diff", "images", "--path-orig", "left", "--path", "right", "-o", "dyff"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "dyff output is not supported for diff images") {
+		t.Fatalf("Execute() error = %v, want dyff unsupported for diff images", err)
+	}
+}
+
+func TestDiffAppsMarkdownDyffStyle(t *testing.T) {
+	root := t.TempDir()
+	left := filepath.Join(root, "left")
+	right := filepath.Join(root, "right")
+	writeSimpleAppForCLI(t, left, "old")
+	writeSimpleAppForCLI(t, right, "new")
+	rawFile := filepath.Join(root, "raw.diff")
+
+	result := runCLI(t, "diff", "apps", "--path-orig", left, "--path", right, "-o", "markdown",
+		"--markdown-diff-style", "dyff", "--raw-output-file", rawFile, "--exit-code=false")
+
+	for _, want := range []string{"```diff\n", "@@ data.value @@\n", "# v1/ConfigMap/demo/demo\n", "! \u00b1 value change\n", "- old\n", "+ new\n"} {
+		if !strings.Contains(result.Stdout, want) {
+			t.Fatalf("stdout missing %q:\n%s", want, result.Stdout)
+		}
+	}
+	raw, err := os.ReadFile(rawFile)
+	if err != nil {
+		t.Fatalf("read raw output: %v", err)
+	}
+	if !strings.Contains(string(raw), "+  value: new") || strings.Contains(string(raw), "! \u00b1") {
+		t.Fatalf("raw output file is not the unified diff:\n%s", raw)
+	}
+}
+
+func TestDiffMarkdownDiffStyleValidation(t *testing.T) {
+	for _, command := range []string{"apps", "app demo"} {
+		args := append(append([]string{"diff"}, strings.Fields(command)...),
+			"--path-orig", "left", "--path", "right", "-o", "markdown", "--markdown-diff-style", "fancy")
+		cmd := NewRootCommandWithDependencies(VersionInfo{}, Dependencies{Orchestrator: &recordingCLIOrchestrator{}})
+		cmd.SetArgs(args)
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+
+		err := cmd.Execute()
+		if err == nil || !strings.Contains(err.Error(), "markdown diff style must be unified or dyff") {
+			t.Fatalf("%s: Execute() error = %v, want invalid markdown diff style", command, err)
+		}
+	}
+}
+
+func TestDiffImagesHasNoMarkdownDiffStyleFlag(t *testing.T) {
+	cmd := NewRootCommandWithDependencies(VersionInfo{}, Dependencies{Orchestrator: &recordingCLIOrchestrator{}})
+	cmd.SetArgs([]string{"diff", "images", "--path-orig", "left", "--path", "right", "--markdown-diff-style", "dyff"})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "unknown flag") {
+		t.Fatalf("Execute() error = %v, want unknown flag", err)
+	}
 }

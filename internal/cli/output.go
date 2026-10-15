@@ -11,9 +11,13 @@ import (
 const (
 	diffOutputUnified  = "diff"
 	diffOutputMarkdown = "markdown"
+	diffOutputDyff     = "dyff"
 )
 
-const testOutputText = "text"
+const (
+	testOutputText    = "text"
+	diffImagesCommand = "diff images"
+)
 
 func parseDiffOutput(value, command string) (string, error) {
 	output := strings.TrimSpace(value)
@@ -21,6 +25,11 @@ func parseDiffOutput(value, command string) (string, error) {
 	case "", diffOutputUnified:
 		return diffOutputUnified, nil
 	case string(cliformat.OutputJSON), string(cliformat.OutputYAML), diffOutputMarkdown:
+		return output, nil
+	case diffOutputDyff:
+		if command == diffImagesCommand {
+			return "", fmt.Errorf("dyff output is not supported for %s", command)
+		}
 		return output, nil
 	case string(cliformat.OutputName):
 		return "", fmt.Errorf("name output is not supported for %s", command)
@@ -34,7 +43,7 @@ func parseImageDiffOutput(value string) (string, error) {
 	if output == string(cliformat.OutputName) {
 		return output, nil
 	}
-	return parseDiffOutput(value, "diff images")
+	return parseDiffOutput(value, diffImagesCommand)
 }
 
 func parseTestOutput(value string) (string, error) {
